@@ -1,6 +1,7 @@
 # ASR core
 sherpa-onnx
 numpy
+soundfile
 gguf
 onnxruntime-directml
 

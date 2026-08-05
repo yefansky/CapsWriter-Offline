@@ -19,6 +19,9 @@ if not exist "%PYTHON%" (
     )
 )
 
+call "%~dp0setup_llama_runtime.bat"
+if errorlevel 1 goto :failed
+
 echo Installing or updating build dependencies...
 "%PYTHON%" -m pip install --upgrade pip
 if errorlevel 1 goto :failed

@@ -187,4 +187,7 @@ release
 *.dll 
 *.exe
 
+# llama.cpp runtime directories are generated locally by setup_llama_runtime.bat
+core/server/engines/*/inference/bin/
+
 models/**/*.cfg

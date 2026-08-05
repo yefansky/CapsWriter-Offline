@@ -85,7 +85,7 @@ CapsWriter 的特别之处在于追求：
   - `dist/CapsWriter-Offline/start_client.exe`
   - `dist/CapsWriter-Offline-Client/start_client.exe`
 
-首次运行或构建需要联网下载 Python 依赖。识别功能仍需要按[模型下载说明](docs/模型下载的若干问题.md)将模型放进 `models/`；模型文件没有提交到 Git 仓库。
+首次运行或构建需要联网下载 Python 依赖和 llama.cpp Vulkan 运行库。识别功能仍需要按[模型下载说明](docs/模型下载的若干问题.md)将模型放进 `models/`；模型文件没有提交到 Git 仓库。
 
 
 ## ⚙️ 个性化配置

@@ -20,6 +20,9 @@ if not exist "%PYTHON%" (
 
 )
 
+call "%~dp0setup_llama_runtime.bat"
+if errorlevel 1 goto :failed
+
 echo Checking dependencies...
 "%PYTHON%" -m pip install -r requirements-server.txt -r requirements-client.txt
 if errorlevel 1 goto :failed
