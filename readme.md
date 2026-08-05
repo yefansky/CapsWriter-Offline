@@ -77,6 +77,16 @@ CapsWriter 的特别之处在于追求：
 4.  **启动听写**：双击 `start_client.exe`，**它会自动最小化到托盘菜单**。
 5.  **开始录音**：按住 `CapsLock键` 或 `鼠标侧键X2` 就可以说话了！
 
+### 从本仓库运行或构建
+
+- 双击 `run.bat`：创建本地 Python 3.11 虚拟环境、安装依赖，并分别启动服务端和客户端。
+- 双击 `build.bat`：创建本地 Python 3.11 虚拟环境、安装依赖，并生成以下可执行文件：
+  - `dist/CapsWriter-Offline/start_server.exe`
+  - `dist/CapsWriter-Offline/start_client.exe`
+  - `dist/CapsWriter-Offline-Client/start_client.exe`
+
+首次运行或构建需要联网下载 Python 依赖。识别功能仍需要按[模型下载说明](docs/模型下载的若干问题.md)将模型放进 `models/`；模型文件没有提交到 Git 仓库。
+
 
 ## ⚙️ 个性化配置
 
