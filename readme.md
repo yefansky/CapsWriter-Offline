@@ -73,13 +73,12 @@ CapsWriter 的特别之处在于追求：
 
 1.  **准备环境**：确保安装了 [VC++ 运行库](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)。若要使用文件转录功能，还需安装 [ffmpeg](https://ffmpeg.org/download.html) 并确保其在系统 PATH 中。
 2.  **下载解压**：下载 [Latest Release](https://github.com/HaujetZhao/CapsWriter-Offline/releases/latest) 里的软件本体，再到 [Models Release](https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models) 下载模型压缩包，将模型解压，放入 `models` 文件夹中对应模型的文件夹里。
-3.  **启动服务**：双击 `start_server.exe`，**它会自动最小化到托盘菜单**。
-4.  **启动听写**：双击 `start_client.exe`，**它会自动最小化到托盘菜单**。
-5.  **开始录音**：按住 `CapsLock键` 或 `鼠标侧键X2` 就可以说话了！
+3.  **启动本地输入管理器**：从源码双击 `run.bat`（或运行 `start_manager.py`）。管理器是唯一的任务栏入口，会自动启动本地识别引擎。
+4.  **开始录音**：按住 `CapsLock键` 或 `鼠标侧键X2` 就可以说话了！
 
 ### 从本仓库运行或构建
 
-- 双击 `run.bat`：创建本地 Python 3.11 虚拟环境、安装依赖，并分别启动服务端和客户端。
+- 双击 `run.bat`：创建本地 Python 3.11 虚拟环境、安装依赖，并启动唯一的本地输入管理器。
 - 双击 `build.bat`：创建本地 Python 3.11 虚拟环境、安装依赖，并生成以下可执行文件：
   - `dist/CapsWriter-Offline/start_server.exe`
   - `dist/CapsWriter-Offline/start_client.exe`
@@ -90,7 +89,7 @@ CapsWriter 的特别之处在于追求：
 
 ## ⚙️ 个性化配置
 
-所有的设置都在根目录的 `config_server.py` 和 `config_client.py` 里，可直接编辑。
+日常设置请使用本地输入管理器：可编辑快捷键、热词和转换词；保存后会立即热更新，不需要重启。热词页还可从文章中提取低频候选词并批量加入。高级模型参数仍保留在 `config_server.py` 与 `config_client.py`。
 
 
 ## 🛠️ 常见问题

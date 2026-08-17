@@ -31,11 +31,15 @@ class MicRunner:
         self.tray_manager.start()
 
         # 2. UI 提示
-        TipsDisplay.show_mic_tips()
+        # 管理器模式不再输出旧的客户端/服务端控制台说明。
+        if not self.app.managed:
+            TipsDisplay.show_mic_tips()
 
         # 3. 开启运行组件 (音频流、快捷键监听)
         self.app.stream.start()
+        self.app.stream.start_device_monitor()
         self.app.shortcut.start()
+        self.app.start_settings_watcher()
         
         # 4. 开启 UDP 控制 (如果启用)
         if Config.udp_control:
@@ -61,4 +65,3 @@ class MicRunner:
         self.processor = ResultProcessor(self.app)
         await self.processor.start()
             
-

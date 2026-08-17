@@ -56,7 +56,9 @@ class ShortcutTask:
         self.pool = None
 
         # 录音状态动画
-        self._status = Status('开始录音', spinner='point')
+        # Rich 的动态 spinner 在无控制台运行时会申请/唤起控制台窗口。
+        # 管理器模式改由日志页观察状态，绝不在按键时创建控制台。
+        self._status = None if app.managed else Status('开始录音', spinner='point')
 
     @property
     def state(self) -> ClientState:
@@ -88,7 +90,8 @@ class ShortcutTask:
         self.state.start_recording(self.recording_start_time)
 
         # 打印动画：正在录音
-        self._status.start()
+        if self._status:
+            self._status.start()
 
         # 启动识别任务
         recorder = self._get_recorder()
@@ -103,7 +106,8 @@ class ShortcutTask:
 
         self.is_recording = False
         self.state.stop_recording()
-        self._status.stop()
+        if self._status:
+            self._status.stop()
 
         self.task.cancel()
         self.task = None
@@ -114,7 +118,8 @@ class ShortcutTask:
 
         self.is_recording = False
         self.state.stop_recording()
-        self._status.stop()
+        if self._status:
+            self._status.stop()
 
         asyncio.run_coroutine_threadsafe(
             self.state.queue_in.put({

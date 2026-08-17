@@ -4,6 +4,7 @@ cd /d "%~dp0"
 
 set "VENV=.venv"
 set "PYTHON=%VENV%\Scripts\python.exe"
+set "PYTHONW=%VENV%\Scripts\pythonw.exe"
 
 echo.
 echo === CapsWriter-Offline source runner ===
@@ -27,17 +28,11 @@ echo Checking dependencies...
 "%PYTHON%" -m pip install -r requirements-server.txt -r requirements-client.txt
 if errorlevel 1 goto :failed
 
-echo Starting server in a new window...
-start "CapsWriter Server" cmd /k ""%PYTHON%" start_server.py"
-
-echo Waiting for the local server to start...
-timeout /t 2 /nobreak >nul
-
-echo Starting client in a new window...
-start "CapsWriter Client" cmd /k ""%PYTHON%" start_client.py"
+echo Starting the unified local input manager...
+start "" /b "%PYTHONW%" start_manager.py --restart
 
 echo.
-echo Started. The server and client keep running in their own windows.
+echo Started. The manager is the only taskbar entry and owns the local engine.
 echo If recognition fails, download and unpack an ASR model under models\ first.
 exit /b 0
 

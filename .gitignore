@@ -176,6 +176,8 @@ test_*.py
 test_*.ipynb 
 test_*.md 
 test_*.txt
+!tests/
+!tests/test_runtime_manager.py
 stocks.txt 
 example_*.py
 example_.ipynb

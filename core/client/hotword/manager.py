@@ -174,7 +174,7 @@ class HotwordManager:
 class _HotwordFileHandler(FileSystemEventHandler):
     """热词文件变化处理器"""
 
-    _debounce_delay = 3
+    _debounce_delay = 0.2
 
     def __init__(self, manager: HotwordManager):
         super().__init__()
@@ -239,6 +239,5 @@ class _HotwordFileHandler(FileSystemEventHandler):
                     console.print(f'热词自动更新失败：{e}', style='bright_red')
                     logger.error(f"更新热词失败: {e}", exc_info=True)
             break
-
 
 

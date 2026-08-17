@@ -24,6 +24,10 @@ from config_client import ClientConfig as Config
 from . import logger
 
 
+# Windows 下 FFmpeg 默认会为管道录音短暂创建控制台窗口。
+_CREATE_NO_WINDOW = getattr(__import__('subprocess'), 'CREATE_NO_WINDOW', 0)
+
+
 # 音频文件句柄类型
 AudioWriter = Union[Popen, wave.Wave_write]
 
@@ -91,7 +95,13 @@ class AudioFileManager:
                 '-b:a', '192k',
                 str(file_path),
             ]
-            file_handle = Popen(ffmpeg_command, stdin=PIPE, stdout=DEVNULL, stderr=DEVNULL)
+            file_handle = Popen(
+                ffmpeg_command,
+                stdin=PIPE,
+                stdout=DEVNULL,
+                stderr=DEVNULL,
+                creationflags=_CREATE_NO_WINDOW,
+            )
             logger.debug(f"创建 MP3 文件: {file_path}")
         else:
             # 使用 wave 模块输出 WAV

@@ -1,6 +1,7 @@
 import os
 from collections.abc import Iterable
 from pathlib import Path
+from core.runtime_settings import load_settings
 
 # 版本信息
 __version__ = '2.6'
@@ -15,27 +16,12 @@ class ClientConfig:
     port = '6016'               # Server 端口
 
     # 快捷键配置列表
-    shortcuts = [
-        {
-            'key': 'caps_lock',     # 监听大写锁定键
-            'type': 'keyboard',     # 是键盘快捷键
-            'suppress': True,      # 阻塞按键（短按会补发）
-            'hold_mode': True,      # 长按模式
-            'enabled': True         # 启用此快捷键
-        },
-        {
-            'key': 'x2',
-            'type': 'mouse',
-            'suppress': True,
-            'hold_mode': True,
-            'enabled': True
-        },
-    ]
+    shortcuts = load_settings()['shortcuts']
 
     threshold    = 0.3          # 快捷键触发阈值（秒）
 
-    paste        = False        # 是否以写入剪切板然后模拟 Ctrl-V 粘贴的方式输出结果
-    restore_clip = True         # 模拟粘贴后是否恢复剪贴板
+    paste        = True         # 通过剪贴板 Ctrl-V 上屏，稳定支持中文；避免逐字模拟输入失败
+    restore_clip = False        # 默认保留识别结果，避免慢应用/RDP 尚未粘贴即被恢复
     paste_apps   = ['WeiXin.exe', 'Telegram.exe']  # 匹配时强制粘贴
 
     enter_apps   = [('happ.exe', 0.5), ('hexin.exe', 0.5)]  # (应用名, 延迟秒数) 输出完成后自动回车，如同花顺，输入股票名后，需要回车才能切换
@@ -130,4 +116,3 @@ r"""
   {'key': 'f12', 'type': 'keyboard', 'suppress': True, 'hold_mode': True, 'enabled': True}, 
   {'key': 'x2', 'type': 'mouse', 'suppress': True, 'hold_mode': True, 'enabled': True}, 
 """
-

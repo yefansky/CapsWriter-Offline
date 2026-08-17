@@ -49,7 +49,12 @@ class ProcessManager:
         state.sockets_id = Manager().list()
         
         # 获取标准输入文件描述符，用于 Windows 下的信号传递补丁
-        stdin_fn = sys.stdin.fileno()
+        # pythonw.exe（管理器的无控制台模式）没有标准输入；它不是模型推理所必需的。
+        # 旧逻辑在这里抛 AttributeError，导致服务端在模型检查后静默退出。
+        try:
+            stdin_fn = sys.stdin.fileno() if sys.stdin is not None else None
+        except (AttributeError, OSError):
+            stdin_fn = None
         
         # 3. 创建并启动进程
         self._process = Process(
@@ -87,7 +92,7 @@ class ProcessManager:
                     self._handle_unexpected_exit()
                     return
                 continue
-            
+
         if not self.is_alive: return
         logger.info("模型加载完成，ASR 服务就绪")
         console.rule('[green3]开始服务')
@@ -115,10 +120,9 @@ class ProcessManager:
             # 发送 None 任务通知优雅退出 (作为兜底)
 
             self.app.state.queue_in.put(None)
-            
+
             # 如果 2 秒内没退，则强制 kill
             self._process.join(timeout=2)
             if self._process.is_alive():
                 logger.debug("子进程未响应优雅退出，执行强制终止")
                 self._process.terminate()
-            

@@ -18,7 +18,7 @@ class TrayManager:
 
     def start(self):
         """初始化系统托盘图标"""
-        if not Config.enable_tray:
+        if self.app.managed or not Config.enable_tray:
             return
 
         try:

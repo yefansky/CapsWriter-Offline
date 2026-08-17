@@ -24,9 +24,10 @@ class CapsWriterServer:
     
     管理的外部接口极其简洁：start()。
     """
-    def __init__(self):
+    def __init__(self, managed: bool = False):
         # 确保正确的工作目录
         self.base_dir = Path(__file__).parents[2]
+        self.managed = managed
         os.chdir(self.base_dir)
 
         # 初始化事件循环

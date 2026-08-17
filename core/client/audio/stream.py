@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import sys
 import time
 import threading
 from typing import TYPE_CHECKING, Optional
@@ -54,6 +53,9 @@ class AudioStreamManager:
         self.app = app
         self._channels = 1
         self._running = False  # 标志是否应该运行
+        self._monitor_stop = threading.Event()
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._device_identity = None
 
     @property
     def state(self) -> ClientState:
@@ -124,8 +126,10 @@ class AudioStreamManager:
             logger.warning("无法获取音频设备名称（编码问题）")
         except sd.PortAudioError:
             logger.error("未找到麦克风设备")
-            input('按回车键退出')
-            sys.exit(1)
+            return None
+        except Exception as e:
+            logger.error(f"检测麦克风设备失败: {e}")
+            return None
 
         # 创建音频流
         try:
@@ -142,6 +146,7 @@ class AudioStreamManager:
 
             self.state.stream = stream
             self._running = True
+            self._device_identity = (device.get('name'), device.get('hostapi'))
             logger.debug(
                 f"音频流已启动: 采样率={self.SAMPLE_RATE}, "
                 f"块大小={int(self.BLOCK_DURATION * self.SAMPLE_RATE)}"
@@ -164,6 +169,34 @@ class AudioStreamManager:
             logger.error(f"创建音频流失败: {e}", exc_info=True)
             return None
 
+    def start_device_monitor(self) -> None:
+        """每 5 秒检查一次默认输入设备，支持拔插后的自动恢复。"""
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            return
+        self._monitor_stop.clear()
+        self._monitor_thread = threading.Thread(target=self._monitor_devices, name="mic-device-monitor", daemon=True)
+        self._monitor_thread.start()
+
+    def _monitor_devices(self) -> None:
+        while not self._monitor_stop.wait(5):
+            try:
+                device = sd.query_devices(kind='input')
+                identity = (device.get('name'), device.get('hostapi'))
+            except (sd.PortAudioError, ValueError):
+                if self._running:
+                    logger.warning("检测到麦克风已断开，等待设备重新接入")
+                    self.stop()
+                continue
+            except Exception as exc:
+                logger.debug(f"检查麦克风失败，将在下一轮重试: {exc}")
+                continue
+
+            if not self._running:
+                logger.info("检测到可用麦克风，自动恢复音频流")
+                self.start()
+            elif identity != self._device_identity:
+                logger.info("默认麦克风已变化，自动重建音频流")
+                self.reopen()
     def stop(self) -> None:
         """停止音频流"""
         if not self._running:
@@ -178,6 +211,11 @@ class AudioStreamManager:
                 logger.debug(f"停止音频流时发生错误: {e}")
             finally:
                 self.state.stream = None
+
+    def shutdown(self) -> None:
+        """停止监控线程和音频流，仅供应用退出时调用。"""
+        self._monitor_stop.set()
+        self.stop()
 
     def reopen(self) -> Optional[sd.InputStream]:
         """
