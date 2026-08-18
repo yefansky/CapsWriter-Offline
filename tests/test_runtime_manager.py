@@ -42,7 +42,7 @@ class MicrophoneRecoveryTests(unittest.TestCase):
         manager._monitor_stop = Mock()
         manager._monitor_stop.wait.side_effect = [False, True]
         manager.start = Mock()
-        with patch("core.client.audio.stream.sd.query_devices", return_value={"name": "USB Mic", "hostapi": 0}):
+        with patch("core.client.audio.stream.sd.query_devices", return_value={"index": 7, "name": "USB Mic", "hostapi": 0}):
             manager._monitor_devices()
         manager.start.assert_called_once()
 
