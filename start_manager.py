@@ -14,8 +14,9 @@ import subprocess
 import sys
 import time
 import tkinter as tk
+import sounddevice as sd
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
 from core.runtime_settings import ROOT_DIR, load_settings, save_settings
@@ -66,6 +67,55 @@ def write_lines(path: Path, values: list[str], header: str) -> None:
     path.write_text(header + "\n" + "\n".join(cleaned) + ("\n" if cleaned else ""), encoding="utf-8")
 
 
+def read_rule_rows(path: Path) -> tuple[list[str], list[tuple[str, str]]]:
+    """读取转换规则，保留注释/无法在表格中表达的行，规则拆成原词和替换词。"""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return [], []
+    preserved: list[str] = []
+    rows: list[tuple[str, str]] = []
+    for line in lines:
+        if " = " not in line or line.lstrip().startswith("#"):
+            preserved.append(line)
+            continue
+        source, replacement = line.split(" = ", maxsplit=1)
+        source, replacement = source.strip(), replacement.strip()
+        if source:
+            rows.append((source, replacement))
+        else:
+            preserved.append(line)
+    return preserved, rows
+
+
+def write_rule_rows(path: Path, preserved: list[str], rows: list[tuple[str, str]]) -> None:
+    """写回二维规则表，同时保留原有说明注释。"""
+    unique_rows = list(dict.fromkeys((source.strip(), replacement.strip()) for source, replacement in rows if source.strip()))
+    content = [*preserved, *(f"{source} = {replacement}" for source, replacement in unique_rows)]
+    path.write_text(("\n".join(content) + "\n") if content else "", encoding="utf-8")
+
+
+def log_line_tag(line: str) -> str | None:
+    """为日志行返回显示标签；按最高严重级别着色。"""
+    upper = line.upper()
+    if "CRITICAL" in upper or "ERROR" in upper or "TRACEBACK" in upper:
+        return "log_error"
+    if "WARNING" in upper or " WARN" in upper:
+        return "log_warning"
+    if "DEBUG" in upper:
+        return "log_debug"
+    if "INFO" in upper:
+        return "log_info"
+    if line.lstrip().startswith("====="):
+        return "log_section"
+    return None
+
+
+def microphone_status_text(device: dict[str, Any]) -> str:
+    """生成顶部状态栏的默认输入设备说明。"""
+    return f"麦克风：已连接 · #{device['index']} {device.get('name', '未知设备')}"
+
+
 class CapsWriterManager(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -83,6 +133,7 @@ class CapsWriterManager(tk.Tk):
         self._build_ui()
         self._start_tray()
         self.after(150, self._process_tray_commands)
+        self.after(200, self.refresh_microphone_status)
         self.start_engine()
         self.after(750, self.refresh_logs)
 
@@ -92,8 +143,10 @@ class CapsWriterManager(tk.Tk):
         top = ttk.Frame(root)
         top.pack(fill="x")
         ttk.Label(top, text="CapsWriter 本地输入管理器", font=("Microsoft YaHei UI", 16, "bold")).pack(side="left")
+        self.mic_status = ttk.Label(top, text="麦克风：检测中…")
+        self.mic_status.pack(side="left", padx=(18, 10))
         self.status = ttk.Label(top, text="正在启动…")
-        self.status.pack(side="left", padx=18)
+        self.status.pack(side="left", padx=8)
         ttk.Button(top, text="重启输入引擎", command=self.restart_engine).pack(side="right")
 
         notebook = ttk.Notebook(root)
@@ -102,10 +155,10 @@ class CapsWriterManager(tk.Tk):
         self.words_tab = ttk.Frame(notebook, padding=10)
         self.mapping_tab = ttk.Frame(notebook, padding=10)
         self.logs_tab = ttk.Frame(notebook, padding=10)
+        notebook.add(self.logs_tab, text="运行日志")
         notebook.add(self.shortcut_tab, text="快捷键")
         notebook.add(self.words_tab, text="热词")
         notebook.add(self.mapping_tab, text="转换词")
-        notebook.add(self.logs_tab, text="运行日志")
         self._build_shortcuts()
         self._build_words()
         self._build_mappings()
@@ -129,30 +182,267 @@ class CapsWriterManager(tk.Tk):
         self.reload_shortcuts()
 
     def _build_words(self) -> None:
-        pane = ttk.PanedWindow(self.words_tab, orient="horizontal"); pane.pack(fill="both", expand=True)
-        left = ttk.Labelframe(pane, text="热词库（每行一个）", padding=8)
+        self._word_values = {"client": read_lines(HOT_FILE), "server": read_lines(SERVER_HOT_FILE)}
+        self._word_search: dict[str, tk.StringVar] = {}
+        self._word_tables: dict[str, ttk.Treeview] = {}
+        self._word_entries: dict[str, ttk.Entry] = {}
+        word_notebook = ttk.Notebook(self.words_tab)
+        word_notebook.pack(fill="both", expand=True)
+        client_words_tab = ttk.Frame(word_notebook, padding=8)
+        server_words_tab = ttk.Frame(word_notebook, padding=8)
+        word_notebook.add(client_words_tab, text=f"客户端纠错热词（{len(read_lines(HOT_FILE))}）")
+        word_notebook.add(server_words_tab, text=f"服务端识别热词（{len(read_lines(SERVER_HOT_FILE))}）")
+
+        pane = ttk.PanedWindow(client_words_tab, orient="horizontal"); pane.pack(fill="both", expand=True)
+        left = ttk.Labelframe(pane, text="客户端纠错热词（hot.txt）", padding=8)
         right = ttk.Labelframe(pane, text="从文章找低频候选词", padding=8)
         pane.add(left, weight=1); pane.add(right, weight=1)
-        self.hot_text = tk.Text(left, wrap="word"); self.hot_text.pack(fill="both", expand=True)
-        ttk.Button(left, text="保存并热更新", command=self.save_hotwords).pack(anchor="e", pady=(8, 0))
+        self._build_word_table(left, "client", self.save_hotwords)
         ttk.Label(right, text="粘贴文章：").pack(anchor="w")
         self.article_text = tk.Text(right, height=10, wrap="word"); self.article_text.pack(fill="both", expand=True)
         row = ttk.Frame(right); row.pack(fill="x", pady=6)
         ttk.Button(row, text="提取低频候选", command=self.extract_candidates).pack(side="left")
         ttk.Button(row, text="将选中候选加入热词", command=self.add_candidates).pack(side="right")
         self.candidates = tk.Listbox(right, selectmode="extended", height=10); self.candidates.pack(fill="both", expand=True)
-        self.reload_hotwords()
+        ttk.Label(server_words_tab, text="服务端识别热词库（hot-server.txt，461 条）。保存后会自动重启识别引擎，使模型重新载入热词。", wraplength=780).pack(anchor="w")
+        self._build_word_table(server_words_tab, "server", self.save_server_hotwords)
+
+    def _build_word_table(self, parent: ttk.Widget, kind: str, save_command) -> None:
+        search_row = ttk.Frame(parent); search_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(search_row, text="搜索：").pack(side="left")
+        search = tk.StringVar()
+        search.trace_add("write", lambda *_: self._refresh_word_table(kind))
+        ttk.Entry(search_row, textvariable=search).pack(side="left", fill="x", expand=True)
+        ttk.Button(search_row, text="清除", command=lambda: search.set("")).pack(side="left", padx=(6, 0))
+        self._word_search[kind] = search
+
+        columns = ("number", "part0") if kind == "client" else ("number", "word")
+        table = ttk.Treeview(parent, columns=columns, show="headings", selectmode="extended")
+        table.heading("number", text="#")
+        table.column("number", width=45, anchor="center", stretch=False)
+        if kind == "client":
+            self._configure_client_word_columns(table)
+        else:
+            table.heading("word", text="热词")
+            table.column("word", width=480)
+        table.pack(fill="both", expand=True)
+        table.bind("<Double-1>", lambda event: self._edit_word(kind, event))
+        self._word_tables[kind] = table
+
+        controls = ttk.Frame(parent); controls.pack(fill="x", pady=(7, 0))
+        entry = ttk.Entry(controls); entry.pack(side="left", fill="x", expand=True)
+        self._word_entries[kind] = entry
+        if kind == "client":
+            ttk.Label(controls, text="可用 | 分隔别名").pack(side="left", padx=(5, 0))
+        ttk.Button(controls, text="添加", command=lambda: self._add_word(kind)).pack(side="left", padx=6)
+        ttk.Button(controls, text="删除选中", command=lambda: self._delete_words(kind)).pack(side="left")
+        label = "保存并热更新" if kind == "client" else "保存并重启识别引擎"
+        ttk.Button(controls, text=label, command=save_command).pack(side="right")
+        self._refresh_word_table(kind)
+
+    def _refresh_word_table(self, kind: str) -> None:
+        table = self._word_tables[kind]
+        if kind == "client":
+            self._configure_client_word_columns(table)
+        table.delete(*table.get_children())
+        keyword = self._word_search[kind].get().strip().casefold()
+        for number, word in enumerate(self._word_values[kind], start=1):
+            if not keyword or keyword in word.casefold():
+                if kind == "client":
+                    parts = [part.strip() for part in word.split("|")]
+                    table.insert("", "end", values=(number, *parts))
+                else:
+                    table.insert("", "end", values=(number, word))
+
+    def _configure_client_word_columns(self, table: ttk.Treeview) -> None:
+        """每个 | 分段一个单元格；列数按当前词库最长的纠错组自动扩展。"""
+        part_count = max(1, *(len(word.split("|")) for word in self._word_values.get("client", [])))
+        columns = ("number", *(f"part{index}" for index in range(part_count)))
+        if tuple(table["columns"]) == columns:
+            return
+        table.configure(columns=columns)
+        table.heading("number", text="#")
+        table.column("number", width=45, anchor="center", stretch=False)
+        for index in range(part_count):
+            column = f"part{index}"
+            table.heading(column, text="主热词" if index == 0 else f"别名 {index}")
+            table.column(column, width=145 if index else 160, minwidth=90)
+
+    def _add_word(self, kind: str) -> None:
+        word = self._word_entries[kind].get().strip()
+        if kind == "client":
+            word = " | ".join(part.strip() for part in word.split("|") if part.strip())
+        if word and word not in self._word_values[kind]:
+            self._word_values[kind].append(word)
+            self._word_entries[kind].delete(0, "end")
+            self._refresh_word_table(kind)
+
+    def _delete_words(self, kind: str) -> None:
+        positions = {int(self._word_tables[kind].item(item, "values")[0]) - 1 for item in self._word_tables[kind].selection()}
+        if positions:
+            self._word_values[kind] = [word for index, word in enumerate(self._word_values[kind]) if index not in positions]
+            self._refresh_word_table(kind)
+
+    def _edit_word(self, kind: str, event) -> None:
+        """双击词条即可编辑；搜索筛选状态不会影响实际词库。"""
+        table = self._word_tables[kind]
+        item = table.identify_row(event.y)
+        if not item:
+            return
+        if kind == "client":
+            self._edit_client_word_cell(item, table.identify_column(event.x))
+            return
+        values = table.item(item, "values")
+        if len(values) < 2:
+            return
+        original = values[1]
+        replacement = simpledialog.askstring("编辑热词", "热词：", initialvalue=original, parent=self)
+        if replacement is None:
+            return
+        replacement = replacement.strip()
+        if not replacement:
+            messagebox.showwarning("热词不能为空", "请填写热词，或使用“删除选中”。", parent=self)
+            return
+        if replacement != original and replacement in self._word_values[kind]:
+            messagebox.showwarning("热词重复", f"“{replacement}”已在词库中。", parent=self)
+            return
+        position = self._word_values[kind].index(original)
+        self._word_values[kind][position] = replacement
+        self._refresh_word_table(kind)
+        self.status.configure(text="热词已修改；点击保存后生效")
+
+    def _edit_client_word_cell(self, item: str, column: str) -> None:
+        """编辑以 | 分隔的某一段；空白别名单元格也可双击新增。"""
+        if not column.startswith("#") or column == "#1":
+            return
+        table = self._word_tables["client"]
+        values = table.item(item, "values")
+        position = int(values[0]) - 1
+        original = self._word_values["client"][position]
+        parts = [part.strip() for part in original.split("|")]
+        part_index = int(column[1:]) - 2
+        initial = parts[part_index] if part_index < len(parts) else ""
+        replacement = simpledialog.askstring(
+            "编辑纠错热词",
+            "主热词：" if part_index == 0 else f"别名 {part_index}（留空可删除）：",
+            initialvalue=initial,
+            parent=self,
+        )
+        if replacement is None:
+            return
+        replacement = replacement.strip()
+        if part_index == 0 and not replacement:
+            messagebox.showwarning("主热词不能为空", "请填写主热词；如需删除整条规则请使用“删除选中”。", parent=self)
+            return
+        if part_index < len(parts):
+            if replacement:
+                parts[part_index] = replacement
+            elif part_index:
+                parts.pop(part_index)
+        elif replacement:
+            parts.append(replacement)
+        updated = " | ".join(part for part in parts if part)
+        if updated != original and updated in self._word_values["client"]:
+            messagebox.showwarning("热词重复", f"“{updated}”已在词库中。", parent=self)
+            return
+        self._word_values["client"][position] = updated
+        self._configure_client_word_columns(table)
+        self._refresh_word_table("client")
+        self.status.configure(text="纠错热词已修改；点击保存后热更新")
 
     def _build_mappings(self) -> None:
-        ttk.Label(self.mapping_tab, text="每行一条：原词 = 转换后文字。支持正则表达式；保存后客户端在约 0.2 秒内热更新。").pack(anchor="w")
-        self.rule_text = tk.Text(self.mapping_tab, wrap="none"); self.rule_text.pack(fill="both", expand=True, pady=8)
-        ttk.Button(self.mapping_tab, text="保存并热更新", command=self.save_mappings).pack(anchor="e")
-        self.reload_mappings()
+        ttk.Label(self.mapping_tab, text="左列为原词/正则，右列为替换文字。双击单元格可编辑；保存后客户端约 0.2 秒内热更新。").pack(anchor="w")
+        self._rule_preserved, self._rule_values = read_rule_rows(RULE_FILE)
+        self.rule_search = tk.StringVar()
+        self.rule_search.trace_add("write", lambda *_: self._refresh_rule_table())
+        search_row = ttk.Frame(self.mapping_tab); search_row.pack(fill="x", pady=(8, 6))
+        ttk.Label(search_row, text="搜索：").pack(side="left")
+        ttk.Entry(search_row, textvariable=self.rule_search).pack(side="left", fill="x", expand=True)
+        ttk.Button(search_row, text="清除", command=lambda: self.rule_search.set("")).pack(side="left", padx=(6, 0))
+
+        self.rule_table = ttk.Treeview(self.mapping_tab, columns=("source", "replacement"), show="headings", selectmode="extended")
+        self.rule_table.heading("source", text="原词 / 正则")
+        self.rule_table.heading("replacement", text="替换为")
+        self.rule_table.column("source", width=410)
+        self.rule_table.column("replacement", width=330)
+        self.rule_table.pack(fill="both", expand=True)
+        self.rule_table.bind("<Double-1>", self._edit_rule_cell)
+
+        controls = ttk.Frame(self.mapping_tab); controls.pack(fill="x", pady=(7, 0))
+        self.rule_source_entry = ttk.Entry(controls, width=30); self.rule_source_entry.pack(side="left", fill="x", expand=True)
+        self.rule_replacement_entry = ttk.Entry(controls, width=25); self.rule_replacement_entry.pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(controls, text="添加", command=self._add_rule).pack(side="left")
+        ttk.Button(controls, text="删除选中", command=self._delete_rules).pack(side="left", padx=6)
+        ttk.Button(controls, text="保存并热更新", command=self.save_mappings).pack(side="right")
+        self._refresh_rule_table()
+
+    def _refresh_rule_table(self) -> None:
+        self.rule_table.delete(*self.rule_table.get_children())
+        keyword = self.rule_search.get().strip().casefold()
+        for source, replacement in self._rule_values:
+            if not keyword or keyword in source.casefold() or keyword in replacement.casefold():
+                self.rule_table.insert("", "end", values=(source, replacement))
+
+    def _add_rule(self) -> None:
+        source = self.rule_source_entry.get().strip()
+        replacement = self.rule_replacement_entry.get().strip()
+        if not source:
+            messagebox.showwarning("原词不能为空", "请填写原词或正则表达式。", parent=self)
+            return
+        if any(existing == source for existing, _ in self._rule_values):
+            messagebox.showwarning("原词重复", f"“{source}”已有转换规则。", parent=self)
+            return
+        self._rule_values.append((source, replacement))
+        self.rule_source_entry.delete(0, "end"); self.rule_replacement_entry.delete(0, "end")
+        self._refresh_rule_table()
+
+    def _delete_rules(self) -> None:
+        selected = {tuple(self.rule_table.item(item, "values")) for item in self.rule_table.selection()}
+        if selected:
+            self._rule_values = [rule for rule in self._rule_values if rule not in selected]
+            self._refresh_rule_table()
+
+    def _edit_rule_cell(self, event) -> None:
+        item = self.rule_table.identify_row(event.y)
+        column = self.rule_table.identify_column(event.x)
+        if not item or column not in ("#1", "#2"):
+            return
+        source, replacement = self.rule_table.item(item, "values")
+        is_source = column == "#1"
+        value = simpledialog.askstring("编辑转换词", "原词 / 正则：" if is_source else "替换为：", initialvalue=source if is_source else replacement, parent=self)
+        if value is None:
+            return
+        value = value.strip()
+        if is_source and not value:
+            messagebox.showwarning("原词不能为空", "原词或正则表达式不能为空。", parent=self)
+            return
+        updated = (value, replacement) if is_source else (source, value)
+        if is_source and value != source and any(existing == value for existing, _ in self._rule_values):
+            messagebox.showwarning("原词重复", f"“{value}”已有转换规则。", parent=self)
+            return
+        position = self._rule_values.index((source, replacement))
+        self._rule_values[position] = updated
+        self._refresh_rule_table()
+        self.status.configure(text="转换词已修改；点击保存后热更新")
 
     def _build_logs(self) -> None:
         ttk.Label(self.logs_tab, text="实时读取 client_latest.log 与 server_latest.log；选中后可复制报错。 ").pack(anchor="w")
-        self.log_view = tk.Text(self.logs_tab, wrap="none", state="disabled", font=("Consolas", 9))
-        self.log_view.pack(fill="both", expand=True, pady=8)
+        log_container = ttk.Frame(self.logs_tab)
+        log_container.pack(fill="both", expand=True, pady=8)
+        self.log_view = tk.Text(log_container, wrap="none", state="disabled", font=("Consolas", 9))
+        self.log_view.tag_configure("log_error", foreground="#D13438")
+        self.log_view.tag_configure("log_warning", foreground="#B66900")
+        self.log_view.tag_configure("log_info", foreground="#1769AA")
+        self.log_view.tag_configure("log_debug", foreground="#707070")
+        self.log_view.tag_configure("log_section", foreground="#5B3CC4", font=("Consolas", 9, "bold"))
+        vertical_scrollbar = ttk.Scrollbar(log_container, orient="vertical", command=self.log_view.yview)
+        horizontal_scrollbar = ttk.Scrollbar(log_container, orient="horizontal", command=self.log_view.xview)
+        self.log_view.configure(yscrollcommand=vertical_scrollbar.set, xscrollcommand=horizontal_scrollbar.set)
+        self.log_view.grid(row=0, column=0, sticky="nsew")
+        vertical_scrollbar.grid(row=0, column=1, sticky="ns")
+        horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
+        log_container.rowconfigure(0, weight=1)
+        log_container.columnconfigure(0, weight=1)
         controls = ttk.Frame(self.logs_tab); controls.pack(fill="x")
         ttk.Button(controls, text="复制选中", command=self.copy_selected_log).pack(side="left")
         ttk.Button(controls, text="复制全部", command=self.copy_all_logs).pack(side="left", padx=6)
@@ -218,6 +508,18 @@ class CapsWriterManager(tk.Tk):
         except OSError as exc:
             return f"无法读取 {path.name}: {exc}"
 
+    def refresh_microphone_status(self) -> None:
+        """独立显示默认输入设备；与客户端的 5 秒热插拔恢复相互独立。"""
+        try:
+            device = sd.query_devices(kind="input")
+            if device.get("max_input_channels", 0) < 1:
+                raise sd.PortAudioError("默认设备没有输入声道")
+            self.mic_status.configure(text=microphone_status_text(device))
+        except Exception:
+            self.mic_status.configure(text="麦克风：未连接（持续检查中）")
+        if self.winfo_exists():
+            self.after(2000, self.refresh_microphone_status)
+
     def refresh_logs(self) -> None:
         content = "\n\n===== 客户端日志 =====\n" + self._read_log_tail(ROOT_DIR / "logs" / "client_latest.log")
         content += "\n\n===== 服务端日志 =====\n" + self._read_log_tail(ROOT_DIR / "logs" / "server_latest.log")
@@ -226,7 +528,9 @@ class CapsWriterManager(tk.Tk):
             self._last_log_text = content
             self.log_view.configure(state="normal")
             self.log_view.delete("1.0", "end")
-            self.log_view.insert("1.0", content)
+            for line in content.splitlines(keepends=True):
+                tag = log_line_tag(line)
+                self.log_view.insert("end", line, tag) if tag else self.log_view.insert("end", line)
             if follow_tail:
                 self.log_view.see("end")
             self.log_view.configure(state="disabled")
@@ -280,12 +584,21 @@ class CapsWriterManager(tk.Tk):
         self.status.configure(text="快捷键已保存并热更新")
 
     def reload_hotwords(self) -> None:
-        self.hot_text.delete("1.0", "end"); self.hot_text.insert("1.0", "\n".join(read_lines(HOT_FILE)))
+        self._word_values["client"] = read_lines(HOT_FILE)
+        self._refresh_word_table("client")
 
     def save_hotwords(self) -> None:
-        words = self.hot_text.get("1.0", "end").splitlines()
-        write_lines(HOT_FILE, words, "# 由 CapsWriter 管理器维护的热词，每行一个")
+        write_lines(HOT_FILE, self._word_values["client"], "# 由 CapsWriter 管理器维护的热词，每行一个")
         self.status.configure(text="热词已保存并热更新")
+
+    def reload_server_hotwords(self) -> None:
+        self._word_values["server"] = read_lines(SERVER_HOT_FILE)
+        self._refresh_word_table("server")
+
+    def save_server_hotwords(self) -> None:
+        write_lines(SERVER_HOT_FILE, self._word_values["server"], "# 由 CapsWriter 管理器维护的服务端识别热词，每行一个")
+        self.status.configure(text="服务端热词已保存，正在重启识别引擎以载入新词库…")
+        self.restart_engine()
 
     def extract_candidates(self) -> None:
         text = self.article_text.get("1.0", "end")
@@ -293,7 +606,7 @@ class CapsWriterManager(tk.Tk):
         counts: dict[str, int] = {}
         for token in tokens:
             counts[token] = counts.get(token, 0) + 1
-        known = set(read_lines(HOT_FILE))
+        known = set(self._word_values["client"])
         choices = sorted((token for token, count in counts.items() if count == 1 and token not in known), key=lambda x: (-len(x), x))[:200]
         self.candidates.delete(0, "end")
         for token in choices:
@@ -302,17 +615,16 @@ class CapsWriterManager(tk.Tk):
     def add_candidates(self) -> None:
         selected = [self.candidates.get(i) for i in self.candidates.curselection()]
         if selected:
-            existing = self.hot_text.get("1.0", "end").strip()
-            self.hot_text.delete("1.0", "end")
-            self.hot_text.insert("1.0", "\n".join(filter(None, [existing, *selected])))
+            self._word_values["client"] = list(dict.fromkeys([*self._word_values["client"], *selected]))
+            self._refresh_word_table("client")
             self.save_hotwords()
 
     def reload_mappings(self) -> None:
-        self.rule_text.delete("1.0", "end"); self.rule_text.insert("1.0", "\n".join(read_lines(RULE_FILE)))
+        self._rule_preserved, self._rule_values = read_rule_rows(RULE_FILE)
+        self._refresh_rule_table()
 
     def save_mappings(self) -> None:
-        rules = self.rule_text.get("1.0", "end").splitlines()
-        write_lines(RULE_FILE, rules, "# 由 CapsWriter 管理器维护：原词 = 转换后文字")
+        write_rule_rows(RULE_FILE, self._rule_preserved, self._rule_values)
         self.status.configure(text="转换词已保存并热更新")
 
     def start_engine(self) -> None:

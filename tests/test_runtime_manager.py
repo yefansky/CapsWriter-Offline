@@ -9,6 +9,7 @@ from core.client.audio.stream import AudioStreamManager
 from core.client.shortcut.shortcut_config import Shortcut
 from core.client.shortcut.task import ShortcutTask
 from core.client.audio.file_manager import _CREATE_NO_WINDOW
+from start_manager import log_line_tag, microphone_status_text, read_rule_rows, write_rule_rows
 
 
 class RuntimeSettingsTests(unittest.TestCase):
@@ -56,6 +57,38 @@ class ManagedModeTests(unittest.TestCase):
 
     def test_ffmpeg_is_configured_without_console_window(self):
         self.assertIsInstance(_CREATE_NO_WINDOW, int)
+
+
+class RuleTableStorageTests(unittest.TestCase):
+    def test_rule_rows_split_into_two_columns_and_preserve_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hot-rule.txt"
+            path.write_text("# 说明\n原词 = 替换词\n空替换 = \n", encoding="utf-8")
+            preserved, rows = read_rule_rows(path)
+            self.assertEqual(preserved, ["# 说明"])
+            self.assertEqual(rows, [("原词", "替换词"), ("空替换", "")])
+            write_rule_rows(path, preserved, [("原词", "新替换"), ("空替换", "")])
+            self.assertEqual(
+                path.read_text(encoding="utf-8"),
+                "# 说明\n原词 = 新替换\n空替换 = \n",
+            )
+
+
+class LogHighlightTests(unittest.TestCase):
+    def test_log_levels_are_colored_by_severity(self):
+        self.assertEqual(log_line_tag("10:00 ERROR request failed"), "log_error")
+        self.assertEqual(log_line_tag("10:00 WARNING retrying"), "log_warning")
+        self.assertEqual(log_line_tag("10:00 INFO connected"), "log_info")
+        self.assertEqual(log_line_tag("10:00 DEBUG details"), "log_debug")
+        self.assertEqual(log_line_tag("===== 客户端日志 ====="), "log_section")
+
+
+class MicrophoneStatusTests(unittest.TestCase):
+    def test_top_status_includes_connected_device_name(self):
+        self.assertEqual(
+            microphone_status_text({"index": 1, "name": "Wireless Mic Rx"}),
+            "麦克风：已连接 · #1 Wireless Mic Rx",
+        )
 
 
 if __name__ == "__main__":
