@@ -9,6 +9,7 @@ from core.client.audio.stream import AudioStreamManager
 from core.client.shortcut.shortcut_config import Shortcut
 from core.client.shortcut.task import ShortcutTask
 from core.client.audio.file_manager import _CREATE_NO_WINDOW
+from core.startup import startup_command
 from start_manager import log_line_tag, microphone_status_text, read_rule_rows, write_rule_rows
 
 
@@ -89,6 +90,14 @@ class MicrophoneStatusTests(unittest.TestCase):
             microphone_status_text({"index": 1, "name": "Wireless Mic Rx"}),
             "麦克风：已连接 · #1 Wireless Mic Rx",
         )
+
+
+class WindowsStartupTests(unittest.TestCase):
+    def test_startup_command_uses_absolute_manager_path(self):
+        command = startup_command()
+        self.assertIn("start_manager.py", command)
+        self.assertIn("pythonw.exe", command)
+        self.assertTrue(command.endswith(" --restart"))
 
 
 if __name__ == "__main__":

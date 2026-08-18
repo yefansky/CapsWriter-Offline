@@ -20,6 +20,7 @@ from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
 from core.runtime_settings import ROOT_DIR, load_settings, save_settings
+from core.startup import is_startup_enabled, set_startup_enabled
 
 
 INSTANCE_FILE = ROOT_DIR / "logs" / "manager-instance.json"
@@ -207,7 +208,7 @@ class CapsWriterManager(tk.Tk):
         self._page_host.pack(side="left", fill="both", expand=True)
         self._pages: dict[str, ttk.Frame] = {}
         self._nav_buttons: dict[str, tk.Button] = {}
-        for key, label in (("logs", "运行日志"), ("shortcuts", "快捷键"), ("words", "热词库"), ("mappings", "转换词")):
+        for key, label in (("logs", "运行日志"), ("shortcuts", "快捷键"), ("words", "热词库"), ("mappings", "转换词"), ("system", "系统设置")):
             button = tk.Button(
                 sidebar, text=label, command=lambda page=key: self._show_page(page), anchor="w",
                 background="#181818", foreground="#C8C8C8", activebackground="#2A2D2E", activeforeground="#FFFFFF",
@@ -221,11 +222,13 @@ class CapsWriterManager(tk.Tk):
         self.words_tab = ttk.Frame(self._page_host, padding=4)
         self.mapping_tab = ttk.Frame(self._page_host, padding=4)
         self.logs_tab = ttk.Frame(self._page_host, padding=4)
-        self._pages = {"logs": self.logs_tab, "shortcuts": self.shortcut_tab, "words": self.words_tab, "mappings": self.mapping_tab}
+        self.system_tab = ttk.Frame(self._page_host, padding=4)
+        self._pages = {"logs": self.logs_tab, "shortcuts": self.shortcut_tab, "words": self.words_tab, "mappings": self.mapping_tab, "system": self.system_tab}
         self._build_shortcuts()
         self._build_words()
         self._build_mappings()
         self._build_logs()
+        self._build_system_settings()
         self._show_page("logs")
 
     def _show_page(self, page: str) -> None:
@@ -479,6 +482,33 @@ class CapsWriterManager(tk.Tk):
         ttk.Button(controls, text="删除选中", command=self._delete_rules).pack(side="left", padx=6)
         ttk.Button(controls, text="保存并热更新", command=self.save_mappings).pack(side="right")
         self._refresh_rule_table()
+
+    def _build_system_settings(self) -> None:
+        ttk.Label(self.system_tab, text="系统设置", style="Title.TLabel").pack(anchor="w", pady=(6, 4))
+        ttk.Label(self.system_tab, text="管理器仅在当前 Windows 用户登录后自动运行，不需要管理员权限。", style="Subtitle.TLabel").pack(anchor="w", pady=(0, 18))
+        card = tk.Frame(self.system_tab, background="#2D2D30", highlightthickness=1, highlightbackground="#3E3E42", padx=18, pady=16)
+        card.pack(fill="x")
+        tk.Label(card, text="随系统启动", background="#2D2D30", foreground="#FFFFFF", font=("Arial", 12, "bold"), anchor="w").pack(anchor="w")
+        self.startup_detail = tk.Label(card, background="#2D2D30", foreground="#A7A7A7", font=("Arial", 10), anchor="w")
+        self.startup_detail.pack(anchor="w", pady=(5, 12))
+        self.startup_button = ttk.Button(card, command=self.toggle_startup, style="Accent.TButton")
+        self.startup_button.pack(anchor="w")
+        self._refresh_startup_setting()
+
+    def _refresh_startup_setting(self) -> None:
+        enabled = is_startup_enabled()
+        self.startup_detail.configure(text="已启用：登录后自动启动本地输入管理器。" if enabled else "未启用：需要手动运行 install.bat 或 run.bat。")
+        self.startup_button.configure(text="关闭随系统启动" if enabled else "开启随系统启动")
+
+    def toggle_startup(self) -> None:
+        enabled = not is_startup_enabled()
+        try:
+            set_startup_enabled(enabled)
+        except OSError as exc:
+            messagebox.showerror("启动项设置失败", f"无法修改当前用户的 Windows 启动项：\n{exc}", parent=self)
+            return
+        self._refresh_startup_setting()
+        self.status.configure(text="已开启随系统启动" if enabled else "已关闭随系统启动")
 
     def _refresh_rule_table(self) -> None:
         self.rule_table.delete(*self.rule_table.get_children())
@@ -802,7 +832,18 @@ class CapsWriterManager(tk.Tk):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--enable-startup", action="store_true")
+    parser.add_argument("--disable-startup", action="store_true")
+    parser.add_argument("--stop", action="store_true")
     args = parser.parse_args()
+    if args.stop:
+        stop_previous_manager()
+    if args.enable_startup:
+        set_startup_enabled(True)
+    if args.disable_startup:
+        set_startup_enabled(False)
+    if args.enable_startup or args.disable_startup or args.stop:
+        return
     if args.restart:
         stop_previous_manager()
     guard = InstanceGuard()
