@@ -120,8 +120,9 @@ class CapsWriterManager(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("CapsWriter 本地输入管理器")
-        self.geometry("880x620")
-        self.minsize(760, 520)
+        self.geometry("1060x700")
+        self.minsize(860, 560)
+        self._configure_vscode_theme()
         self.children_processes: list[subprocess.Popen] = []
         self._server_process: subprocess.Popen | None = None
         self._client_process: subprocess.Popen | None = None
@@ -137,36 +138,112 @@ class CapsWriterManager(tk.Tk):
         self.start_engine()
         self.after(750, self.refresh_logs)
 
-    def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=14)
-        root.pack(fill="both", expand=True)
-        top = ttk.Frame(root)
-        top.pack(fill="x")
-        ttk.Label(top, text="CapsWriter 本地输入管理器", font=("Microsoft YaHei UI", 16, "bold")).pack(side="left")
-        self.mic_status = ttk.Label(top, text="麦克风：检测中…")
-        self.mic_status.pack(side="left", padx=(18, 10))
-        self.status = ttk.Label(top, text="正在启动…")
-        self.status.pack(side="left", padx=8)
-        ttk.Button(top, text="重启输入引擎", command=self.restart_engine).pack(side="right")
+    def _configure_vscode_theme(self) -> None:
+        """使用不依赖第三方组件的 VS Code 深色编辑器视觉规范。"""
+        colors = {
+            "background": "#1E1E1E", "panel": "#252526", "surface": "#2D2D30",
+            "hover": "#37373D", "border": "#3E3E42", "text": "#D4D4D4",
+            "muted": "#A7A7A7", "blue": "#007ACC", "blue_hover": "#1488D4",
+            "green": "#89D185", "red": "#F48771", "selection": "#264F78",
+        }
+        self.colors = colors
+        self.configure(background=colors["background"])
+        # ttk 样式中的字体族名含空格会被 Tcl 拆成多个参数；使用单词字体族确保 Windows/Tk 兼容。
+        self.option_add("*Font", "Arial 10")
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure(".", background=colors["background"], foreground=colors["text"])
+        style.configure("TFrame", background=colors["background"])
+        style.configure("Header.TFrame", background=colors["panel"])
+        style.configure("TLabel", background=colors["background"], foreground=colors["text"])
+        style.configure("Title.TLabel", background=colors["panel"], foreground="#FFFFFF", font=("Arial", 17, "bold"))
+        style.configure("Subtitle.TLabel", background=colors["panel"], foreground=colors["muted"], font=("Arial", 9))
+        style.configure("MicOnline.TLabel", background="#173A2B", foreground=colors["green"], padding=(10, 5))
+        style.configure("MicOffline.TLabel", background="#48252A", foreground=colors["red"], padding=(10, 5))
+        style.configure("Engine.TLabel", background=colors["surface"], foreground=colors["text"], padding=(10, 5))
+        style.configure("TButton", background=colors["surface"], foreground=colors["text"], borderwidth=0, padding=(10, 6))
+        style.map("TButton", background=[("active", colors["hover"]), ("pressed", "#45454A")])
+        style.configure("Accent.TButton", background=colors["blue"], foreground="#FFFFFF", padding=(12, 7))
+        style.map("Accent.TButton", background=[("active", colors["blue_hover"]), ("pressed", "#0067AC")])
+        style.configure("TEntry", fieldbackground=colors["surface"], foreground=colors["text"], bordercolor=colors["border"], insertcolor="#FFFFFF", padding=6)
+        style.configure("TCombobox", fieldbackground=colors["surface"], background=colors["surface"], foreground=colors["text"], arrowcolor=colors["text"], padding=5)
+        style.map("TCombobox", fieldbackground=[("readonly", colors["surface"])], foreground=[("readonly", colors["text"])])
+        style.configure("Treeview", background=colors["surface"], fieldbackground=colors["surface"], foreground=colors["text"], borderwidth=0, rowheight=29)
+        style.map("Treeview", background=[("selected", colors["selection"])], foreground=[("selected", "#FFFFFF")])
+        style.configure("Treeview.Heading", background="#333337", foreground="#E7E7E7", relief="flat", font=("Arial", 9, "bold"), padding=(8, 7))
+        style.map("Treeview.Heading", background=[("active", colors["hover"])])
+        style.layout("Flat.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        style.configure("Flat.Treeview", background=colors["surface"], fieldbackground=colors["surface"], foreground=colors["text"], borderwidth=0, rowheight=29)
+        style.map("Flat.Treeview", background=[("selected", colors["selection"])], foreground=[("selected", "#FFFFFF")])
+        style.configure("Flat.Treeview.Heading", background="#333337", foreground="#E7E7E7", relief="flat", font=("Arial", 9, "bold"), padding=(8, 7))
+        style.configure("TNotebook", background=colors["background"], borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", background=colors["surface"], foreground=colors["muted"], padding=(13, 7), borderwidth=0, relief="flat")
+        style.map("TNotebook.Tab", background=[("selected", colors["background"]), ("active", colors["hover"])], foreground=[("selected", "#FFFFFF"), ("active", "#FFFFFF")])
+        style.configure("TLabelframe", background=colors["background"], bordercolor=colors["border"], relief="flat", borderwidth=0)
+        style.configure("TLabelframe.Label", background=colors["background"], foreground="#DCDCDC", font=("Arial", 10, "bold"))
+        style.configure("TScrollbar", background=colors["surface"], troughcolor=colors["background"], bordercolor=colors["background"], arrowcolor=colors["muted"])
 
-        notebook = ttk.Notebook(root)
-        notebook.pack(fill="both", expand=True, pady=(12, 0))
-        self.shortcut_tab = ttk.Frame(notebook, padding=10)
-        self.words_tab = ttk.Frame(notebook, padding=10)
-        self.mapping_tab = ttk.Frame(notebook, padding=10)
-        self.logs_tab = ttk.Frame(notebook, padding=10)
-        notebook.add(self.logs_tab, text="运行日志")
-        notebook.add(self.shortcut_tab, text="快捷键")
-        notebook.add(self.words_tab, text="热词")
-        notebook.add(self.mapping_tab, text="转换词")
+    def _build_ui(self) -> None:
+        root = ttk.Frame(self, padding=0)
+        root.pack(fill="both", expand=True)
+        top = ttk.Frame(root, style="Header.TFrame", padding=(20, 14))
+        top.pack(fill="x")
+        brand = ttk.Frame(top, style="Header.TFrame"); brand.pack(side="left")
+        ttk.Label(brand, text="CapsWriter", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(brand, text="LOCAL INPUT MANAGER", style="Subtitle.TLabel").pack(anchor="w")
+        ttk.Button(top, text="重启输入引擎", command=self.restart_engine, style="Accent.TButton").pack(side="right")
+        self.mic_status = ttk.Label(top, text="麦克风：检测中…", style="MicOnline.TLabel")
+        self.mic_status.pack(side="right", padx=(0, 10))
+        self.status = ttk.Label(top, text="正在启动…", style="Engine.TLabel")
+        self.status.pack(side="right", padx=(0, 10))
+
+        body = tk.Frame(root, background=self.colors["background"])
+        body.pack(fill="both", expand=True)
+        sidebar = tk.Frame(body, background="#181818", width=166)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+        tk.Label(sidebar, text="管理", background="#181818", foreground="#858585", font=("Arial", 9, "bold"), anchor="w").pack(fill="x", padx=18, pady=(22, 8))
+        self._page_host = ttk.Frame(body, padding=16)
+        self._page_host.pack(side="left", fill="both", expand=True)
+        self._pages: dict[str, ttk.Frame] = {}
+        self._nav_buttons: dict[str, tk.Button] = {}
+        for key, label in (("logs", "运行日志"), ("shortcuts", "快捷键"), ("words", "热词库"), ("mappings", "转换词")):
+            button = tk.Button(
+                sidebar, text=label, command=lambda page=key: self._show_page(page), anchor="w",
+                background="#181818", foreground="#C8C8C8", activebackground="#2A2D2E", activeforeground="#FFFFFF",
+                relief="flat", borderwidth=0, highlightthickness=0, padx=18, pady=10, font=("Arial", 10), cursor="hand2",
+            )
+            button.pack(fill="x", padx=8, pady=2)
+            self._nav_buttons[key] = button
+        tk.Frame(sidebar, background="#2A2D2E", height=1).pack(fill="x", padx=16, pady=14)
+        tk.Label(sidebar, text="本地模型 · 离线运行", background="#181818", foreground="#777777", font=("Arial", 9), anchor="w").pack(fill="x", padx=18)
+        self.shortcut_tab = ttk.Frame(self._page_host, padding=4)
+        self.words_tab = ttk.Frame(self._page_host, padding=4)
+        self.mapping_tab = ttk.Frame(self._page_host, padding=4)
+        self.logs_tab = ttk.Frame(self._page_host, padding=4)
+        self._pages = {"logs": self.logs_tab, "shortcuts": self.shortcut_tab, "words": self.words_tab, "mappings": self.mapping_tab}
         self._build_shortcuts()
         self._build_words()
         self._build_mappings()
         self._build_logs()
+        self._show_page("logs")
+
+    def _show_page(self, page: str) -> None:
+        """扁平侧栏导航，替换传统凸起标签页。"""
+        for name, frame in self._pages.items():
+            frame.pack_forget()
+            button = self._nav_buttons[name]
+            selected = name == page
+            button.configure(
+                background="#094771" if selected else "#181818",
+                foreground="#FFFFFF" if selected else "#C8C8C8",
+                activebackground="#0E639C" if selected else "#2A2D2E",
+            )
+        self._pages[page].pack(fill="both", expand=True)
 
     def _build_shortcuts(self) -> None:
         columns = ("key", "type", "hold", "suppress", "enabled")
-        self.shortcut_table = ttk.Treeview(self.shortcut_tab, columns=columns, show="headings", height=12)
+        self.shortcut_table = ttk.Treeview(self.shortcut_tab, columns=columns, show="headings", height=12, style="Flat.Treeview")
         headings = {"key": "按键", "type": "类型", "hold": "触发方式", "suppress": "阻塞原按键", "enabled": "启用"}
         for col in columns:
             self.shortcut_table.heading(col, text=headings[col])
@@ -186,12 +263,20 @@ class CapsWriterManager(tk.Tk):
         self._word_search: dict[str, tk.StringVar] = {}
         self._word_tables: dict[str, ttk.Treeview] = {}
         self._word_entries: dict[str, ttk.Entry] = {}
-        word_notebook = ttk.Notebook(self.words_tab)
-        word_notebook.pack(fill="both", expand=True)
-        client_words_tab = ttk.Frame(word_notebook, padding=8)
-        server_words_tab = ttk.Frame(word_notebook, padding=8)
-        word_notebook.add(client_words_tab, text=f"客户端纠错热词（{len(read_lines(HOT_FILE))}）")
-        word_notebook.add(server_words_tab, text=f"服务端识别热词（{len(read_lines(SERVER_HOT_FILE))}）")
+        word_switcher = tk.Frame(self.words_tab, background=self.colors["background"])
+        word_switcher.pack(fill="x", pady=(0, 12))
+        client_words_tab = ttk.Frame(self.words_tab, padding=0)
+        server_words_tab = ttk.Frame(self.words_tab, padding=0)
+        self._word_pages = {"client": client_words_tab, "server": server_words_tab}
+        self._word_nav_buttons: dict[str, tk.Button] = {}
+        for key, text in (("client", f"客户端纠错热词  {len(read_lines(HOT_FILE))}"), ("server", f"服务端识别热词  {len(read_lines(SERVER_HOT_FILE))}")):
+            button = tk.Button(
+                word_switcher, text=text, command=lambda page=key: self._show_word_page(page),
+                background="#2D2D30", foreground="#C8C8C8", activebackground="#3E3E42", activeforeground="#FFFFFF",
+                relief="flat", borderwidth=0, highlightthickness=0, padx=14, pady=8, font=("Arial", 10), cursor="hand2",
+            )
+            button.pack(side="left", padx=(0, 6))
+            self._word_nav_buttons[key] = button
 
         pane = ttk.PanedWindow(client_words_tab, orient="horizontal"); pane.pack(fill="both", expand=True)
         left = ttk.Labelframe(pane, text="客户端纠错热词（hot.txt）", padding=8)
@@ -199,13 +284,32 @@ class CapsWriterManager(tk.Tk):
         pane.add(left, weight=1); pane.add(right, weight=1)
         self._build_word_table(left, "client", self.save_hotwords)
         ttk.Label(right, text="粘贴文章：").pack(anchor="w")
-        self.article_text = tk.Text(right, height=10, wrap="word"); self.article_text.pack(fill="both", expand=True)
+        self.article_text = tk.Text(
+            right, height=10, wrap="word", background=self.colors["surface"], foreground=self.colors["text"],
+            insertbackground="#FFFFFF", selectbackground=self.colors["selection"], relief="flat", borderwidth=0, highlightthickness=0,
+        ); self.article_text.pack(fill="both", expand=True, pady=(4, 0))
         row = ttk.Frame(right); row.pack(fill="x", pady=6)
         ttk.Button(row, text="提取低频候选", command=self.extract_candidates).pack(side="left")
         ttk.Button(row, text="将选中候选加入热词", command=self.add_candidates).pack(side="right")
-        self.candidates = tk.Listbox(right, selectmode="extended", height=10); self.candidates.pack(fill="both", expand=True)
+        self.candidates = tk.Listbox(
+            right, selectmode="extended", height=10, background=self.colors["surface"], foreground=self.colors["text"],
+            selectbackground=self.colors["selection"], selectforeground="#FFFFFF", relief="flat", borderwidth=0, highlightthickness=0,
+        ); self.candidates.pack(fill="both", expand=True)
         ttk.Label(server_words_tab, text="服务端识别热词库（hot-server.txt，461 条）。保存后会自动重启识别引擎，使模型重新载入热词。", wraplength=780).pack(anchor="w")
         self._build_word_table(server_words_tab, "server", self.save_server_hotwords)
+        self._show_word_page("client")
+
+    def _show_word_page(self, page: str) -> None:
+        """使用扁平分段按钮代替内嵌 Notebook 标签。"""
+        for name, frame in self._word_pages.items():
+            frame.pack_forget()
+            selected = name == page
+            self._word_nav_buttons[name].configure(
+                background="#0E639C" if selected else "#2D2D30",
+                foreground="#FFFFFF" if selected else "#C8C8C8",
+                activebackground="#1177BB" if selected else "#3E3E42",
+            )
+        self._word_pages[page].pack(fill="both", expand=True)
 
     def _build_word_table(self, parent: ttk.Widget, kind: str, save_command) -> None:
         search_row = ttk.Frame(parent); search_row.pack(fill="x", pady=(0, 6))
@@ -217,7 +321,7 @@ class CapsWriterManager(tk.Tk):
         self._word_search[kind] = search
 
         columns = ("number", "part0") if kind == "client" else ("number", "word")
-        table = ttk.Treeview(parent, columns=columns, show="headings", selectmode="extended")
+        table = ttk.Treeview(parent, columns=columns, show="headings", selectmode="extended", style="Flat.Treeview")
         table.heading("number", text="#")
         table.column("number", width=45, anchor="center", stretch=False)
         if kind == "client":
@@ -360,7 +464,7 @@ class CapsWriterManager(tk.Tk):
         ttk.Entry(search_row, textvariable=self.rule_search).pack(side="left", fill="x", expand=True)
         ttk.Button(search_row, text="清除", command=lambda: self.rule_search.set("")).pack(side="left", padx=(6, 0))
 
-        self.rule_table = ttk.Treeview(self.mapping_tab, columns=("source", "replacement"), show="headings", selectmode="extended")
+        self.rule_table = ttk.Treeview(self.mapping_tab, columns=("source", "replacement"), show="headings", selectmode="extended", style="Flat.Treeview")
         self.rule_table.heading("source", text="原词 / 正则")
         self.rule_table.heading("replacement", text="替换为")
         self.rule_table.column("source", width=410)
@@ -429,14 +533,21 @@ class CapsWriterManager(tk.Tk):
         ttk.Label(self.logs_tab, text="实时读取 client_latest.log 与 server_latest.log；选中后可复制报错。 ").pack(anchor="w")
         log_container = ttk.Frame(self.logs_tab)
         log_container.pack(fill="both", expand=True, pady=8)
-        self.log_view = tk.Text(log_container, wrap="none", state="disabled", font=("Consolas", 9))
-        self.log_view.tag_configure("log_error", foreground="#D13438")
-        self.log_view.tag_configure("log_warning", foreground="#B66900")
-        self.log_view.tag_configure("log_info", foreground="#1769AA")
-        self.log_view.tag_configure("log_debug", foreground="#707070")
-        self.log_view.tag_configure("log_section", foreground="#5B3CC4", font=("Consolas", 9, "bold"))
-        vertical_scrollbar = ttk.Scrollbar(log_container, orient="vertical", command=self.log_view.yview)
-        horizontal_scrollbar = ttk.Scrollbar(log_container, orient="horizontal", command=self.log_view.xview)
+        self.log_view = tk.Text(
+            log_container, wrap="none", state="disabled", font=("Consolas", 9), background="#181818",
+            foreground="#D4D4D4", insertbackground="#FFFFFF", selectbackground=self.colors["selection"], relief="flat", borderwidth=0, highlightthickness=0,
+        )
+        self.log_view.tag_configure("log_error", foreground="#F48771")
+        self.log_view.tag_configure("log_warning", foreground="#CCA700")
+        self.log_view.tag_configure("log_info", foreground="#4FC1FF")
+        self.log_view.tag_configure("log_debug", foreground="#808080")
+        self.log_view.tag_configure("log_section", foreground="#C586C0", font=("Consolas", 9, "bold"))
+        scrollbar_options = {
+            "background": "#3E3E42", "activebackground": "#5A5D5E", "troughcolor": "#181818",
+            "relief": "flat", "borderwidth": 0, "highlightthickness": 0, "elementborderwidth": 0,
+        }
+        vertical_scrollbar = tk.Scrollbar(log_container, orient="vertical", command=self.log_view.yview, **scrollbar_options)
+        horizontal_scrollbar = tk.Scrollbar(log_container, orient="horizontal", command=self.log_view.xview, **scrollbar_options)
         self.log_view.configure(yscrollcommand=vertical_scrollbar.set, xscrollcommand=horizontal_scrollbar.set)
         self.log_view.grid(row=0, column=0, sticky="nsew")
         vertical_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -514,9 +625,9 @@ class CapsWriterManager(tk.Tk):
             device = sd.query_devices(kind="input")
             if device.get("max_input_channels", 0) < 1:
                 raise sd.PortAudioError("默认设备没有输入声道")
-            self.mic_status.configure(text=microphone_status_text(device))
+            self.mic_status.configure(text=microphone_status_text(device), style="MicOnline.TLabel")
         except Exception:
-            self.mic_status.configure(text="麦克风：未连接（持续检查中）")
+            self.mic_status.configure(text="麦克风：未连接（持续检查中）", style="MicOffline.TLabel")
         if self.winfo_exists():
             self.after(2000, self.refresh_microphone_status)
 
