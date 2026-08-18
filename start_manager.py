@@ -19,6 +19,7 @@ from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
+from config_server import ServerConfig
 from core.runtime_settings import ROOT_DIR, load_settings, save_settings
 from core.startup import is_startup_enabled, set_startup_enabled
 
@@ -66,6 +67,32 @@ def read_lines(path: Path) -> list[str]:
 def write_lines(path: Path, values: list[str], header: str) -> None:
     cleaned = list(dict.fromkeys(value.strip() for value in values if value.strip()))
     path.write_text(header + "\n" + "\n".join(cleaned) + ("\n" if cleaned else ""), encoding="utf-8")
+
+
+def build_client_hotword_entry(target: str, aliases: str = "") -> str:
+    """把最终输出和模型错识别写法合成 hot.txt 的一条定向纠错规则。"""
+    parts = [target.strip(), *(part.strip() for part in aliases.split("|"))]
+    unique_parts = list(dict.fromkeys(part for part in parts if part))
+    return " | ".join(unique_parts)
+
+
+def server_hotword_supported(model_type: str) -> bool:
+    """返回当前服务端识别引擎是否会读取 hot-server.txt。"""
+    return model_type.strip().lower() not in {"qwen_asr", "paraformer"}
+
+
+def server_hotword_help(model_type: str, count: int) -> str:
+    """说明当前识别引擎是否真的会读取服务端热词。"""
+    if not server_hotword_supported(model_type):
+        return (
+            f"服务端识别热词库（hot-server.txt，{count} 条）。"
+            f"当前引擎 {model_type} 不读取服务端热词；这里的改动不会影响识别结果。"
+            "请使用客户端定向纠错。"
+        )
+    return (
+        f"服务端识别热词库（hot-server.txt，{count} 条）。"
+        "保存后会自动重启识别引擎，使模型重新载入热词。"
+    )
 
 
 def read_rule_rows(path: Path) -> tuple[list[str], list[tuple[str, str]]]:
@@ -266,6 +293,7 @@ class CapsWriterManager(tk.Tk):
         self._word_search: dict[str, tk.StringVar] = {}
         self._word_tables: dict[str, ttk.Treeview] = {}
         self._word_entries: dict[str, ttk.Entry] = {}
+        self._word_alias_entries: dict[str, ttk.Entry] = {}
         word_switcher = tk.Frame(self.words_tab, background=self.colors["background"])
         word_switcher.pack(fill="x", pady=(0, 12))
         client_words_tab = ttk.Frame(self.words_tab, padding=0)
@@ -285,6 +313,15 @@ class CapsWriterManager(tk.Tk):
         left = ttk.Labelframe(pane, text="客户端纠错热词（hot.txt）", padding=8)
         right = ttk.Labelframe(pane, text="从文章找低频候选词", padding=8)
         pane.add(left, weight=1); pane.add(right, weight=1)
+        ttk.Label(
+            left,
+            text=(
+                "主热词是最终输出；错识别别名填写模型实际听成的文字。"
+                "例如：主热词“子agent”，错识别别名“是 agent | 贼 agent”。"
+                "别名会精确强制纠错；只填主热词仍受音素相似度门槛限制。"
+            ),
+            wraplength=430,
+        ).pack(anchor="w", pady=(0, 8))
         self._build_word_table(left, "client", self.save_hotwords)
         ttk.Label(right, text="粘贴文章：").pack(anchor="w")
         self.article_text = tk.Text(
@@ -298,7 +335,11 @@ class CapsWriterManager(tk.Tk):
             right, selectmode="extended", height=10, background=self.colors["surface"], foreground=self.colors["text"],
             selectbackground=self.colors["selection"], selectforeground="#FFFFFF", relief="flat", borderwidth=0, highlightthickness=0,
         ); self.candidates.pack(fill="both", expand=True)
-        ttk.Label(server_words_tab, text="服务端识别热词库（hot-server.txt，461 条）。保存后会自动重启识别引擎，使模型重新载入热词。", wraplength=780).pack(anchor="w")
+        ttk.Label(
+            server_words_tab,
+            text=server_hotword_help(ServerConfig.model_type, len(self._word_values["server"])),
+            wraplength=780,
+        ).pack(anchor="w")
         self._build_word_table(server_words_tab, "server", self.save_server_hotwords)
         self._show_word_page("client")
 
@@ -336,15 +377,32 @@ class CapsWriterManager(tk.Tk):
         table.bind("<Double-1>", lambda event: self._edit_word(kind, event))
         self._word_tables[kind] = table
 
-        controls = ttk.Frame(parent); controls.pack(fill="x", pady=(7, 0))
-        entry = ttk.Entry(controls); entry.pack(side="left", fill="x", expand=True)
-        self._word_entries[kind] = entry
         if kind == "client":
-            ttk.Label(controls, text="可用 | 分隔别名").pack(side="left", padx=(5, 0))
-        ttk.Button(controls, text="添加", command=lambda: self._add_word(kind)).pack(side="left", padx=6)
-        ttk.Button(controls, text="删除选中", command=lambda: self._delete_words(kind)).pack(side="left")
-        label = "保存并热更新" if kind == "client" else "保存并重启识别引擎"
-        ttk.Button(controls, text=label, command=save_command).pack(side="right")
+            inputs = ttk.Frame(parent); inputs.pack(fill="x", pady=(7, 0))
+            ttk.Label(inputs, text="最终输出：").grid(row=0, column=0, sticky="w", pady=2)
+            entry = ttk.Entry(inputs)
+            entry.grid(row=0, column=1, sticky="ew", pady=2)
+            ttk.Label(inputs, text="错识别别名：").grid(row=1, column=0, sticky="w", pady=2)
+            alias_entry = ttk.Entry(inputs)
+            alias_entry.grid(row=1, column=1, sticky="ew", pady=2)
+            ttk.Label(inputs, text="多个用 | 分隔").grid(row=1, column=2, sticky="w", padx=(6, 0), pady=2)
+            ttk.Button(inputs, text="添加", command=lambda: self._add_word(kind)).grid(row=0, column=2, sticky="e", padx=(6, 0), pady=2)
+            ttk.Button(inputs, text="删除选中", command=lambda: self._delete_words(kind)).grid(row=0, column=3, padx=(6, 0), pady=2)
+            ttk.Button(inputs, text="保存并热更新", command=save_command).grid(row=1, column=3, padx=(6, 0), pady=2)
+            inputs.columnconfigure(1, weight=1)
+            self._word_alias_entries[kind] = alias_entry
+        else:
+            inputs = ttk.Frame(parent); inputs.pack(fill="x", pady=(7, 0))
+            entry = ttk.Entry(inputs)
+            entry.pack(fill="x", expand=True)
+        self._word_entries[kind] = entry
+
+        if kind != "client":
+            controls = ttk.Frame(parent); controls.pack(fill="x", pady=(7, 0))
+            ttk.Button(controls, text="添加", command=lambda: self._add_word(kind)).pack(side="left")
+            ttk.Button(controls, text="删除选中", command=lambda: self._delete_words(kind)).pack(side="left", padx=6)
+            save_label = "保存并重启识别引擎" if server_hotword_supported(ServerConfig.model_type) else "保存（当前引擎不使用）"
+            ttk.Button(controls, text=save_label, command=save_command).pack(side="right")
         self._refresh_word_table(kind)
 
     def _refresh_word_table(self, kind: str) -> None:
@@ -378,10 +436,13 @@ class CapsWriterManager(tk.Tk):
     def _add_word(self, kind: str) -> None:
         word = self._word_entries[kind].get().strip()
         if kind == "client":
-            word = " | ".join(part.strip() for part in word.split("|") if part.strip())
+            aliases = self._word_alias_entries[kind].get().strip()
+            word = build_client_hotword_entry(word, aliases)
         if word and word not in self._word_values[kind]:
             self._word_values[kind].append(word)
             self._word_entries[kind].delete(0, "end")
+            if kind == "client":
+                self._word_alias_entries[kind].delete(0, "end")
             self._refresh_word_table(kind)
 
     def _delete_words(self, kind: str) -> None:
@@ -738,6 +799,9 @@ class CapsWriterManager(tk.Tk):
 
     def save_server_hotwords(self) -> None:
         write_lines(SERVER_HOT_FILE, self._word_values["server"], "# 由 CapsWriter 管理器维护的服务端识别热词，每行一个")
+        if not server_hotword_supported(ServerConfig.model_type):
+            self.status.configure(text=f"服务端热词已保存；当前 {ServerConfig.model_type} 引擎不会读取它")
+            return
         self.status.configure(text="服务端热词已保存，正在重启识别引擎以载入新词库…")
         self.restart_engine()
 

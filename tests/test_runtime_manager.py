@@ -10,7 +10,16 @@ from core.client.shortcut.shortcut_config import Shortcut
 from core.client.shortcut.task import ShortcutTask
 from core.client.audio.file_manager import _CREATE_NO_WINDOW
 from core.startup import startup_command
-from start_manager import log_line_tag, microphone_status_text, read_rule_rows, write_rule_rows
+from start_manager import (
+    build_client_hotword_entry,
+    log_line_tag,
+    microphone_status_text,
+    read_rule_rows,
+    server_hotword_help,
+    server_hotword_supported,
+    write_rule_rows,
+)
+from core.client.hotword.hot_phoneme import PhonemeCorrector
 
 
 class RuntimeSettingsTests(unittest.TestCase):
@@ -73,6 +82,35 @@ class RuleTableStorageTests(unittest.TestCase):
                 path.read_text(encoding="utf-8"),
                 "# 说明\n原词 = 新替换\n空替换 = \n",
             )
+
+
+class HotwordCorrectionTests(unittest.TestCase):
+    def test_manager_builds_explicit_correction_aliases(self):
+        self.assertEqual(
+            build_client_hotword_entry("子agent", "是 agent | 贼 agent | 是 agent"),
+            "子agent | 是 agent | 贼 agent",
+        )
+
+    def test_explicit_aliases_force_observed_recognition_errors(self):
+        corrector = PhonemeCorrector(threshold=0.85, similar_threshold=0.6)
+        corrector.update_hotwords("子agent | 是 agent | 贼 agent | 是 A 君 | 是 A 君车 | 子 inject")
+        cases = {
+            "是 agent": "子agent",
+            "是 A 君": "子agent",
+            "是 A 君车": "子agent",
+            "开一个贼 agent": "开一个子agent",
+            "可以多开几个子 inject 去并行验证": "可以多开几个子agent 去并行验证",
+        }
+        for recognized, expected in cases.items():
+            with self.subTest(recognized=recognized):
+                self.assertEqual(corrector.correct(recognized).text, expected)
+
+    def test_qwen_server_hotword_page_explains_unsupported_engine(self):
+        help_text = server_hotword_help("qwen_asr", 10)
+        self.assertFalse(server_hotword_supported("qwen_asr"))
+        self.assertTrue(server_hotword_supported("fun_asr_nano"))
+        self.assertIn("不读取服务端热词", help_text)
+        self.assertIn("客户端定向纠错", help_text)
 
 
 class LogHighlightTests(unittest.TestCase):
