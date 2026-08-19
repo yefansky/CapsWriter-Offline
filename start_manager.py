@@ -20,6 +20,7 @@ from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
 from config_server import ServerConfig
+from core.client.audio.devices import preferred_input_device
 from core.runtime_settings import ROOT_DIR, load_settings, save_settings
 from core.startup import is_startup_enabled, set_startup_enabled
 
@@ -713,7 +714,9 @@ class CapsWriterManager(tk.Tk):
     def refresh_microphone_status(self) -> None:
         """独立显示默认输入设备；与客户端的 5 秒热插拔恢复相互独立。"""
         try:
-            device = sd.query_devices(kind="input")
+            device = preferred_input_device()
+            if device is None:
+                raise sd.PortAudioError("未找到可用输入设备")
             if device.get("max_input_channels", 0) < 1:
                 raise sd.PortAudioError("默认设备没有输入声道")
             self.mic_status.configure(text=microphone_status_text(device), style="MicOnline.TLabel")

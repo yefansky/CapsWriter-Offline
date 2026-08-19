@@ -4,8 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import sounddevice as sd
+
 from core.runtime_settings import load_settings, save_settings
 from core.client.audio.stream import AudioStreamManager
+from core.client.audio.devices import input_candidates, is_remote_input
 from core.client.shortcut.shortcut_config import Shortcut
 from core.client.shortcut.task import ShortcutTask
 from core.client.audio.file_manager import _CREATE_NO_WINDOW
@@ -40,6 +43,11 @@ class RuntimeSettingsTests(unittest.TestCase):
 
 
 class MicrophoneRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        logger_patcher = patch("core.client.audio.stream.logger")
+        self.stream_logger = logger_patcher.start()
+        self.addCleanup(logger_patcher.stop)
+
     def test_start_without_microphone_does_not_exit(self):
         app = Mock(); app.state.stream = None
         manager = AudioStreamManager(app)
@@ -53,9 +61,65 @@ class MicrophoneRecoveryTests(unittest.TestCase):
         manager._monitor_stop = Mock()
         manager._monitor_stop.wait.side_effect = [False, True]
         manager.start = Mock()
-        with patch("core.client.audio.stream.sd.query_devices", return_value={"index": 7, "name": "USB Mic", "hostapi": 0}):
+        with patch("core.client.audio.stream.preferred_input_device", return_value={"index": 7, "name": "USB Mic", "hostapi": 0}):
             manager._monitor_devices()
         manager.start.assert_called_once()
+
+    def test_local_session_excludes_stale_remote_audio_and_prefers_real_microphone(self):
+        devices = [
+            {"index": 1, "name": "远程音频", "hostapi": 0, "max_input_channels": 2},
+            {"index": 19, "name": "立体声混音 (Realtek Stereo Mix)", "hostapi": 3, "max_input_channels": 2},
+            {"index": 21, "name": "麦克风 (Realtek HD Audio Mic input)", "hostapi": 3, "max_input_channels": 2},
+        ]
+        with (
+            patch("core.client.audio.devices.is_remote_session", return_value=False),
+            patch("core.client.audio.devices.sd.query_devices", side_effect=[devices[0], devices]),
+        ):
+            candidates = input_candidates(refresh_if_empty=False)
+        self.assertEqual([device["index"] for device in candidates], [21, 19])
+        self.assertTrue(is_remote_input(devices[0]))
+
+    def test_remote_session_keeps_remote_audio_as_default(self):
+        devices = [
+            {"index": 1, "name": "Remote Audio", "hostapi": 0, "max_input_channels": 2},
+            {"index": 21, "name": "Microphone (Realtek)", "hostapi": 3, "max_input_channels": 2},
+        ]
+        with (
+            patch("core.client.audio.devices.is_remote_session", return_value=True),
+            patch("core.client.audio.devices.sd.query_devices", side_effect=[devices[0], devices]),
+        ):
+            candidates = input_candidates(refresh_if_empty=False)
+        self.assertEqual(candidates[0]["index"], 1)
+
+    def test_monitor_reopens_when_login_session_changes(self):
+        app = Mock(); app.state.stream = None
+        manager = AudioStreamManager(app)
+        manager._remote_session = True
+        manager._monitor_stop = Mock()
+        manager._monitor_stop.wait.side_effect = [False, True]
+        manager.reopen = Mock()
+        with patch("core.client.audio.stream.is_remote_session", return_value=False):
+            manager._monitor_devices()
+        manager.reopen.assert_called_once()
+
+    def test_start_falls_back_when_first_candidate_cannot_open(self):
+        app = Mock(); app.state.stream = None; app.managed = True
+        manager = AudioStreamManager(app)
+        candidates = [
+            {"index": 8, "name": "Unavailable Mic", "hostapi": 0, "max_input_channels": 2},
+            {"index": 9, "name": "Working Mic", "hostapi": 0, "max_input_channels": 1},
+        ]
+        working_stream = Mock()
+        with (
+            patch("core.client.audio.stream.input_candidates", return_value=candidates),
+            patch(
+                "core.client.audio.stream.sd.InputStream",
+                side_effect=[sd.PortAudioError("device unavailable"), working_stream],
+            ) as input_stream,
+        ):
+            self.assertIs(manager.start(), working_stream)
+        self.assertEqual(input_stream.call_count, 2)
+        self.assertEqual(manager._device_identity, (9, "Working Mic", 0))
 
 
 class ManagedModeTests(unittest.TestCase):

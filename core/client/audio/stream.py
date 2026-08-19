@@ -16,6 +16,7 @@ import numpy as np
 import sounddevice as sd
 
 from core.client.state import console
+from .devices import input_candidates, is_remote_session, preferred_input_device
 from . import logger
 
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ class AudioStreamManager:
         self._monitor_stop = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._device_identity = None
+        self._remote_session = is_remote_session()
         self._stream_lock = threading.RLock()
 
     @property
@@ -114,49 +116,59 @@ class AudioStreamManager:
                 logger.debug("音频流已在运行，跳过启动")
                 return self.state.stream
 
-            # 查询到的默认设备必须作为明确的 index 传给 InputStream。
-            # 不能再传 device=None，否则 PortAudio 在热插拔后可能选回旧的“立体声混音”。
+            # 先重建 PortAudio 的设备清单。RDP 断开后，长驻进程可能继续缓存
+            # 已不存在的“远程音频”，只查询默认设备会永远重试同一个坏索引。
             try:
-                device = sd.query_devices(kind='input')
-                device_index = device['index']
-                self._channels = min(2, device['max_input_channels'])
-                device_name = device.get('name', '未知设备')
-                if not self.app.managed:
-                    console.print(f'使用默认音频设备：[italic]{device_name}，声道数：{self._channels}', end='\n\n')
-                logger.info(f"使用输入设备: #{device_index} {device_name}, 声道数: {self._channels}")
+                candidates = input_candidates(refresh=True)
             except UnicodeDecodeError:
                 logger.warning("无法获取麦克风设备名称（编码问题）")
-                return None
-            except sd.PortAudioError:
-                logger.error("未找到麦克风设备")
                 return None
             except Exception as e:
                 logger.error(f"检测麦克风设备失败: {e}")
                 return None
 
-            # 创建音频流
-            try:
-                stream = sd.InputStream(
-                    samplerate=self.SAMPLE_RATE,
-                    blocksize=int(self.BLOCK_DURATION * self.SAMPLE_RATE),
-                    device=device_index,
-                    dtype="float32",
-                    channels=self._channels,
-                    callback=self._audio_callback,
-                    finished_callback=self._on_stream_finished,
-                )
-                stream.start()
+            if not candidates:
+                logger.error("未找到麦克风设备")
+                return None
 
-                self.state.stream = stream
-                self._running = True
-                self._device_identity = (device_index, device.get('name'), device.get('hostapi'))
-                logger.info(f"音频流已绑定到输入设备: #{device_index} {device_name}")
-                return stream
+            # 按优先级逐个尝试。本机控制台会排除远程音频；默认设备缺失时，
+            # 优先真实麦克风，并把立体声混音/线路输入留作最后兜底。
+            last_error: Exception | None = None
+            for device in candidates:
+                device_index = device['index']
+                self._channels = min(2, device['max_input_channels'])
+                device_name = device.get('name', '未知设备')
+                logger.info(f"尝试输入设备: #{device_index} {device_name}, 声道数: {self._channels}")
+                try:
+                    stream = sd.InputStream(
+                        samplerate=self.SAMPLE_RATE,
+                        blocksize=int(self.BLOCK_DURATION * self.SAMPLE_RATE),
+                        device=device_index,
+                        dtype="float32",
+                        channels=self._channels,
+                        callback=self._audio_callback,
+                        finished_callback=self._on_stream_finished,
+                    )
+                    stream.start()
 
-            except sd.PortAudioError as e:
-                logger.error(f"创建音频流失败: {e}", exc_info=True)
-                if '-9999' in str(e) and not self.app.managed:
-                    console.print("""
+                    self.state.stream = stream
+                    self._running = True
+                    self._device_identity = (device_index, device.get('name'), device.get('hostapi'))
+                    self._remote_session = is_remote_session()
+                    if not self.app.managed:
+                        console.print(f'使用音频设备：[italic]{device_name}，声道数：{self._channels}', end='\n\n')
+                    logger.info(f"音频流已绑定到输入设备: #{device_index} {device_name}")
+                    return stream
+                except (sd.PortAudioError, ValueError) as exc:
+                    last_error = exc
+                    logger.warning(f"输入设备 #{device_index} 无法打开，尝试下一项: {exc}")
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(f"创建输入流失败，尝试下一项: {exc}", exc_info=True)
+
+            logger.error(f"所有输入设备均无法打开: {last_error}")
+            if last_error and '-9999' in str(last_error) and not self.app.managed:
+                console.print("""
 [bold red]检测到麦克风被占用或权限异常（错误码 -9999）[/bold red]
 请尝试以下解决方案：
 
@@ -164,10 +176,7 @@ class AudioStreamManager:
   2. 状态栏右下角音量图标 > 右键菜单 > 声音 > 麦克风的属性，关闭「允许应用程序独占控制该设备」
   3. 状态栏右下角音量图标 > 右键菜单 > 声音 > 麦克风的属性，关闭「增强效果」
 """)
-                return None
-            except Exception as e:
-                logger.error(f"创建音频流失败: {e}", exc_info=True)
-                return None
+            return None
 
     def start_device_monitor(self) -> None:
         """每 5 秒检查一次默认输入设备，支持拔插后的自动恢复。"""
@@ -179,8 +188,18 @@ class AudioStreamManager:
 
     def _monitor_devices(self) -> None:
         while not self._monitor_stop.wait(5):
+            remote_session = is_remote_session()
+            if remote_session != self._remote_session:
+                mode = "远程桌面" if remote_session else "本机控制台"
+                logger.info(f"检测到登录会话切换为{mode}，重新枚举输入设备")
+                self._remote_session = remote_session
+                self.reopen()
+                continue
+
             try:
-                device = sd.query_devices(kind='input')
+                device = preferred_input_device()
+                if device is None:
+                    raise sd.PortAudioError("未找到可用输入设备")
                 identity = (device['index'], device.get('name'), device.get('hostapi'))
             except (sd.PortAudioError, ValueError):
                 if self._running:
@@ -197,6 +216,7 @@ class AudioStreamManager:
             elif identity != self._device_identity:
                 logger.info("默认麦克风已变化，自动重建音频流")
                 self.reopen()
+
     def stop(self) -> None:
         """停止音频流"""
         with self._stream_lock:
