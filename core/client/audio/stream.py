@@ -43,6 +43,7 @@ class AudioStreamManager:
 
     SAMPLE_RATE = 48000
     BLOCK_DURATION = 0.05  # 50ms
+    EMPTY_RESULT_REOPEN_THRESHOLD = 3
 
     def __init__(self, app: CapsWriterClient):
         """
@@ -59,6 +60,8 @@ class AudioStreamManager:
         self._device_identity = None
         self._remote_session = is_remote_session()
         self._stream_lock = threading.RLock()
+        self._consecutive_empty_results = 0
+        self._pending_reopen_reason: Optional[str] = None
 
     @property
     def state(self) -> ClientState:
@@ -155,6 +158,8 @@ class AudioStreamManager:
                     self._running = True
                     self._device_identity = (device_index, device.get('name'), device.get('hostapi'))
                     self._remote_session = is_remote_session()
+                    self._consecutive_empty_results = 0
+                    self._pending_reopen_reason = None
                     if not self.app.managed:
                         console.print(f'使用音频设备：[italic]{device_name}，声道数：{self._channels}', end='\n\n')
                     logger.info(f"音频流已绑定到输入设备: #{device_index} {device_name}")
@@ -186,8 +191,36 @@ class AudioStreamManager:
         self._monitor_thread = threading.Thread(target=self._monitor_devices, name="mic-device-monitor", daemon=True)
         self._monitor_thread.start()
 
+    def observe_recognition_result(self, text: str) -> None:
+        """记录最终识别结果，连续空结果时请求安全重建音频流。"""
+        with self._stream_lock:
+            if text.strip():
+                self._consecutive_empty_results = 0
+                return
+
+            self._consecutive_empty_results += 1
+            if self._consecutive_empty_results < self.EMPTY_RESULT_REOPEN_THRESHOLD:
+                return
+
+            self._consecutive_empty_results = 0
+            self._pending_reopen_reason = (
+                f"连续 {self.EMPTY_RESULT_REOPEN_THRESHOLD} 次最终识别为空，"
+                "音频流可能已进入静音假健康状态"
+            )
+            logger.warning(f"{self._pending_reopen_reason}，将在当前录音结束后自动恢复")
+
     def _monitor_devices(self) -> None:
         while not self._monitor_stop.wait(5):
+            with self._stream_lock:
+                reopen_reason = self._pending_reopen_reason
+                can_reopen = bool(reopen_reason) and not self.state.recording
+                if can_reopen:
+                    self._pending_reopen_reason = None
+            if can_reopen:
+                logger.warning(f"{reopen_reason}，正在重新枚举麦克风")
+                self.reopen()
+                continue
+
             remote_session = is_remote_session()
             if remote_session != self._remote_session:
                 mode = "远程桌面" if remote_session else "本机控制台"
@@ -197,7 +230,9 @@ class AudioStreamManager:
                 continue
 
             try:
-                device = preferred_input_device()
+                # 流已停止时才能安全重建 PortAudio 设备清单。
+                # 这样麦克风重连后不会永久留在旧的空设备快照里。
+                device = preferred_input_device(refresh=not self._running)
                 if device is None:
                     raise sd.PortAudioError("未找到可用输入设备")
                 identity = (device['index'], device.get('name'), device.get('hostapi'))

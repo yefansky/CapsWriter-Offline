@@ -15,7 +15,20 @@ import sounddevice as sd
 _PORTAUDIO_LOCK = threading.RLock()
 _REMOTE_MARKERS = ("远程音频", "remote audio", "remoteaudio", "rdp audio")
 _PREFERRED_MIC_MARKERS = ("麦克风", "microphone", "mic input", " mic ")
-_LAST_RESORT_MARKERS = ("立体声混音", "stereo mix", "线路输入", "line input")
+_UNSUITABLE_INPUT_MARKERS = (
+    "立体声混音",
+    "stereo mix",
+    "what u hear",
+    "wave out mix",
+    "loopback",
+    "monitor of",
+    "线路输入",
+    "line input",
+    "声音映射器",
+    "sound mapper",
+    "主声音捕获驱动程序",
+    "primary sound capture",
+)
 
 
 def is_remote_session() -> bool:
@@ -52,6 +65,16 @@ def is_remote_input(device: dict[str, Any]) -> bool:
     return any(marker in name for marker in _REMOTE_MARKERS)
 
 
+def is_unsuitable_input(device: dict[str, Any]) -> bool:
+    """返回设备是否不适合麦克风听写。
+
+    立体声混音和系统映射器会在物理麦克风断开后仍然成功打开，
+    却只生成近似静音的“假健康”音频流。
+    """
+    name = str(device.get("name", "")).casefold()
+    return any(marker in name for marker in _UNSUITABLE_INPUT_MARKERS)
+
+
 def refresh_portaudio_devices() -> None:
     """重新初始化 PortAudio，清掉远程桌面切换前缓存的设备清单。"""
     terminate = getattr(sd, "_terminate", None)
@@ -72,8 +95,10 @@ def _input_candidates() -> list[dict[str, Any]]:
     devices = [
         dict(device)
         for device in sd.query_devices()
-        if device.get("max_input_channels", 0) > 0
+        if device.get("max_input_channels", 0) > 0 and not is_unsuitable_input(device)
     ]
+    if default_device and is_unsuitable_input(default_device):
+        default_device = None
     remote_session = is_remote_session()
     if not remote_session:
         devices = [device for device in devices if not is_remote_input(device)]
@@ -90,8 +115,6 @@ def _input_candidates() -> list[dict[str, Any]]:
             priority = 1
         elif any(marker in name for marker in _PREFERRED_MIC_MARKERS):
             priority = 2
-        elif any(marker in name for marker in _LAST_RESORT_MARKERS):
-            priority = 4
         else:
             priority = 3
         return priority, int(device.get("index", 999999))

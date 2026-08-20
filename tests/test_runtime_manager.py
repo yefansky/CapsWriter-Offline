@@ -8,7 +8,7 @@ import sounddevice as sd
 
 from core.runtime_settings import load_settings, save_settings
 from core.client.audio.stream import AudioStreamManager
-from core.client.audio.devices import input_candidates, is_remote_input
+from core.client.audio.devices import input_candidates, is_remote_input, is_unsuitable_input
 from core.client.shortcut.shortcut_config import Shortcut
 from core.client.shortcut.task import ShortcutTask
 from core.client.audio.file_manager import _CREATE_NO_WINDOW
@@ -62,8 +62,9 @@ class MicrophoneRecoveryTests(unittest.TestCase):
         manager._monitor_stop = Mock()
         manager._monitor_stop.wait.side_effect = [False, True]
         manager.start = Mock()
-        with patch("core.client.audio.stream.preferred_input_device", return_value={"index": 7, "name": "USB Mic", "hostapi": 0}):
+        with patch("core.client.audio.stream.preferred_input_device", return_value={"index": 7, "name": "USB Mic", "hostapi": 0}) as preferred:
             manager._monitor_devices()
+        preferred.assert_called_once_with(refresh=True)
         manager.start.assert_called_once()
 
     def test_local_session_excludes_stale_remote_audio_and_prefers_real_microphone(self):
@@ -77,8 +78,48 @@ class MicrophoneRecoveryTests(unittest.TestCase):
             patch("core.client.audio.devices.sd.query_devices", side_effect=[devices[0], devices]),
         ):
             candidates = input_candidates(refresh_if_empty=False)
-        self.assertEqual([device["index"] for device in candidates], [21, 19])
+        self.assertEqual([device["index"] for device in candidates], [21])
         self.assertTrue(is_remote_input(devices[0]))
+        self.assertTrue(is_unsuitable_input(devices[1]))
+
+    def test_remote_session_does_not_fall_back_to_stereo_mix(self):
+        devices = [
+            {"index": 0, "name": "立体声混音 (Realtek Stereo Mix)", "hostapi": 3, "max_input_channels": 2},
+            {"index": 2, "name": "Microsoft Sound Mapper - Input", "hostapi": 0, "max_input_channels": 2},
+        ]
+        with (
+            patch("core.client.audio.devices.is_remote_session", return_value=True),
+            patch("core.client.audio.devices.sd.query_devices", side_effect=[devices[0], devices]),
+        ):
+            candidates = input_candidates(refresh_if_empty=False)
+        self.assertEqual(candidates, [])
+
+    def test_three_empty_results_request_reopen_after_recording(self):
+        app = Mock(); app.state.stream = None; app.state.recording = False
+        manager = AudioStreamManager(app)
+        manager._running = True
+        manager._monitor_stop = Mock()
+        manager._monitor_stop.wait.side_effect = [False, True]
+        manager.reopen = Mock()
+
+        manager.observe_recognition_result("")
+        manager.observe_recognition_result("  ")
+        manager.observe_recognition_result("")
+        manager._monitor_devices()
+
+        manager.reopen.assert_called_once()
+
+    def test_non_empty_result_resets_empty_result_watchdog(self):
+        app = Mock(); app.state.stream = None
+        manager = AudioStreamManager(app)
+
+        manager.observe_recognition_result("")
+        manager.observe_recognition_result("")
+        manager.observe_recognition_result("恢复正常")
+        manager.observe_recognition_result("")
+
+        self.assertEqual(manager._consecutive_empty_results, 1)
+        self.assertIsNone(manager._pending_reopen_reason)
 
     def test_remote_session_keeps_remote_audio_as_default(self):
         devices = [
@@ -111,6 +152,7 @@ class MicrophoneRecoveryTests(unittest.TestCase):
             {"index": 9, "name": "Working Mic", "hostapi": 0, "max_input_channels": 1},
         ]
         working_stream = Mock()
+        manager._pending_reopen_reason = "stale request"
         with (
             patch("core.client.audio.stream.input_candidates", return_value=candidates),
             patch(
@@ -121,6 +163,7 @@ class MicrophoneRecoveryTests(unittest.TestCase):
             self.assertIs(manager.start(), working_stream)
         self.assertEqual(input_stream.call_count, 2)
         self.assertEqual(manager._device_identity, (9, "Working Mic", 0))
+        self.assertIsNone(manager._pending_reopen_reason)
 
 
 class ManagedModeTests(unittest.TestCase):

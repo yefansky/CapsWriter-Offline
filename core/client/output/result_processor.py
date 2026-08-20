@@ -191,6 +191,7 @@ class ResultProcessor:
 
         if message.is_final:
             logger.info(f"收到最终识别结果: {text}, 时延: {delay:.2f}s")
+            self.app.stream.observe_recognition_result(text)
         else:
             logger.debug(
                 f"接收到识别结果，文本: {text[:50]}{'...' if len(text) > 50 else ''}, "
