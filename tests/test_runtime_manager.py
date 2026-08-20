@@ -2,7 +2,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import sounddevice as sd
 
@@ -14,6 +14,7 @@ from core.client.shortcut.task import ShortcutTask
 from core.client.audio.file_manager import _CREATE_NO_WINDOW
 from core.startup import startup_command
 from start_manager import (
+    CapsWriterManager,
     build_client_hotword_entry,
     log_line_tag,
     microphone_status_text,
@@ -184,6 +185,94 @@ class LogHighlightTests(unittest.TestCase):
         self.assertEqual(log_line_tag("10:00 INFO connected"), "log_info")
         self.assertEqual(log_line_tag("10:00 DEBUG details"), "log_debug")
         self.assertEqual(log_line_tag("===== 客户端日志 ====="), "log_section")
+
+
+class LogRefreshTests(unittest.TestCase):
+    def build_manager(self):
+        manager = Mock()
+        manager._last_log_text = "旧日志"
+        manager._read_log_tail.side_effect = ["客户端新日志", "服务端新日志"]
+        manager.log_view.tag_ranges.return_value = ()
+        manager.log_view.yview.return_value = (0.0, 1.0)
+        manager.focus_get.return_value = None
+        manager._log_selection_active.return_value = False
+        return manager
+
+    def test_active_selection_only_pauses_automatic_refresh_while_log_has_focus(self):
+        manager = self.build_manager()
+        manager.log_view.tag_ranges.return_value = ("1.0", "1.2")
+        manager.focus_get.return_value = manager.log_view
+        manager._log_selection_active.side_effect = lambda: CapsWriterManager._log_selection_active(manager)
+
+        CapsWriterManager.refresh_logs(manager)
+
+        manager.log_view.delete.assert_not_called()
+        self.assertEqual(manager._last_log_text, "旧日志")
+
+    def test_manual_refresh_overrides_active_selection(self):
+        manager = self.build_manager()
+        manager._log_selection_active.return_value = True
+
+        CapsWriterManager.refresh_logs(manager, force=True)
+
+        manager.log_view.delete.assert_called_once_with("1.0", "end")
+        self.assertIn("客户端新日志", manager._last_log_text)
+        self.assertIn("服务端新日志", manager._last_log_text)
+
+    def test_stale_selection_does_not_pause_refresh_after_focus_moves_away(self):
+        manager = self.build_manager()
+        manager.log_view.tag_ranges.return_value = ("1.0", "1.2")
+        manager.focus_get.return_value = Mock()
+        manager._log_selection_active.side_effect = lambda: CapsWriterManager._log_selection_active(manager)
+
+        CapsWriterManager.refresh_logs(manager)
+
+        manager.log_view.delete.assert_called_once_with("1.0", "end")
+        self.assertIn("客户端新日志", manager._last_log_text)
+
+    def test_failed_render_keeps_previous_snapshot_for_next_retry(self):
+        manager = self.build_manager()
+        manager._log_selection_active.return_value = False
+        manager.log_view.insert.side_effect = RuntimeError("tk redraw failed")
+
+        with self.assertRaisesRegex(RuntimeError, "tk redraw failed"):
+            CapsWriterManager.refresh_logs(manager)
+
+        self.assertEqual(manager._last_log_text, "旧日志")
+        self.assertEqual(
+            manager.log_view.configure.call_args_list[-1],
+            call(state="disabled"),
+        )
+
+    def test_scheduled_refresh_reschedules_after_one_failure(self):
+        manager = Mock()
+        manager._log_refresh_after_id = "old-job"
+        manager.refresh_logs.side_effect = RuntimeError("temporary failure")
+
+        CapsWriterManager._run_scheduled_log_refresh(manager)
+
+        self.assertIsNone(manager._log_refresh_after_id)
+        manager.status.configure.assert_called_once()
+        manager._schedule_log_refresh.assert_called_once_with()
+
+    def test_scheduler_keeps_only_one_pending_job(self):
+        manager = Mock()
+        manager._log_refresh_after_id = "existing-job"
+
+        CapsWriterManager._schedule_log_refresh(manager, 750)
+
+        manager.after.assert_not_called()
+
+    def test_scheduler_records_new_pending_job(self):
+        manager = Mock()
+        manager._log_refresh_after_id = None
+        manager.winfo_exists.return_value = True
+        manager.after.return_value = "new-job"
+
+        CapsWriterManager._schedule_log_refresh(manager, 750)
+
+        manager.after.assert_called_once_with(750, manager._run_scheduled_log_refresh)
+        self.assertEqual(manager._log_refresh_after_id, "new-job")
 
 
 class MicrophoneStatusTests(unittest.TestCase):

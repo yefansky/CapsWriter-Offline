@@ -159,13 +159,14 @@ class CapsWriterManager(tk.Tk):
         self._tray_icon = None
         self._tray_commands: queue.Queue[str] = queue.Queue()
         self._last_log_text = ""
+        self._log_refresh_after_id: str | None = None
         self.protocol("WM_DELETE_WINDOW", self.hide_window)
         self._build_ui()
         self._start_tray()
         self.after(150, self._process_tray_commands)
         self.after(200, self.refresh_microphone_status)
         self.start_engine()
-        self.after(750, self.refresh_logs)
+        self._schedule_log_refresh(750)
 
     def _configure_vscode_theme(self) -> None:
         """使用不依赖第三方组件的 VS Code 深色编辑器视觉规范。"""
@@ -649,7 +650,7 @@ class CapsWriterManager(tk.Tk):
         controls = ttk.Frame(self.logs_tab); controls.pack(fill="x")
         ttk.Button(controls, text="复制选中", command=self.copy_selected_log).pack(side="left")
         ttk.Button(controls, text="复制全部", command=self.copy_all_logs).pack(side="left", padx=6)
-        ttk.Button(controls, text="立即刷新", command=self.refresh_logs).pack(side="right")
+        ttk.Button(controls, text="立即刷新", command=lambda: self.refresh_logs(force=True)).pack(side="right")
 
     def _start_tray(self) -> None:
         """管理器关闭窗口后仍驻留系统托盘，退出动作必须由菜单明确触发。"""
@@ -725,22 +726,52 @@ class CapsWriterManager(tk.Tk):
         if self.winfo_exists():
             self.after(2000, self.refresh_microphone_status)
 
-    def refresh_logs(self) -> None:
+    def _schedule_log_refresh(self, delay_ms: int = 1000) -> None:
+        """保持唯一的日志轮询任务，避免手动刷新叠加定时器。"""
+        if self._log_refresh_after_id is not None:
+            return
+        try:
+            if self.winfo_exists():
+                self._log_refresh_after_id = self.after(delay_ms, self._run_scheduled_log_refresh)
+        except tk.TclError:
+            self._log_refresh_after_id = None
+
+    def _run_scheduled_log_refresh(self) -> None:
+        """执行一次刷新；单次异常不能打断后续轮询。"""
+        self._log_refresh_after_id = None
+        try:
+            self.refresh_logs()
+        except Exception as exc:
+            try:
+                self.status.configure(text=f"日志刷新失败，正在自动重试：{exc}")
+            except tk.TclError:
+                pass
+        finally:
+            self._schedule_log_refresh()
+
+    def _log_selection_active(self) -> bool:
+        """只在用户仍聚焦日志选区时暂停自动重绘。"""
+        return bool(self.log_view.tag_ranges("sel")) and self.focus_get() == self.log_view
+
+    def refresh_logs(self, force: bool = False) -> None:
+        """读取并重绘日志；手动刷新可越过当前文本选区。"""
         content = "\n\n===== 客户端日志 =====\n" + self._read_log_tail(ROOT_DIR / "logs" / "client_latest.log")
         content += "\n\n===== 服务端日志 =====\n" + self._read_log_tail(ROOT_DIR / "logs" / "server_latest.log")
-        if content != self._last_log_text and not self.log_view.tag_ranges("sel"):
-            follow_tail = not self._last_log_text or self.log_view.yview()[1] >= 0.995
-            self._last_log_text = content
-            self.log_view.configure(state="normal")
+        if content == self._last_log_text or (not force and self._log_selection_active()):
+            return
+        follow_tail = not self._last_log_text or self.log_view.yview()[1] >= 0.995
+        self.log_view.configure(state="normal")
+        try:
             self.log_view.delete("1.0", "end")
             for line in content.splitlines(keepends=True):
                 tag = log_line_tag(line)
                 self.log_view.insert("end", line, tag) if tag else self.log_view.insert("end", line)
             if follow_tail:
                 self.log_view.see("end")
+        finally:
             self.log_view.configure(state="disabled")
-        if self.winfo_exists():
-            self.after(1000, self.refresh_logs)
+        # 只有完整重绘成功后才提交快照；失败时下一轮必须重试同一内容。
+        self._last_log_text = content
 
     def copy_selected_log(self) -> None:
         try:
@@ -887,6 +918,12 @@ class CapsWriterManager(tk.Tk):
         self.children_processes.clear()
 
     def shutdown(self) -> None:
+        if self._log_refresh_after_id is not None:
+            try:
+                self.after_cancel(self._log_refresh_after_id)
+            except tk.TclError:
+                pass
+            self._log_refresh_after_id = None
         self.stop_engine()
         if self._tray_icon:
             self._tray_icon.stop()
