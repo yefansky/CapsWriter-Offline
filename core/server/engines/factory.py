@@ -79,6 +79,8 @@ class EngineFactory:
     def create_align_engine() -> BaseAlignEngine:
         """创建对齐引擎 (目前使用 Qwen Force Aligner)"""
         try:
+            from core.server.worker.model_download import ensure_package, optional_package
+            ensure_package(optional_package('force_aligner'))
             from .force_aligner_gguf.align_engine import QwenForceAligner, AlignerConfig
             align_cfg_data = {
                 k: v for k, v in ForceAlignerGGUFArgs.__dict__.items() 

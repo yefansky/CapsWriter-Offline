@@ -39,9 +39,22 @@ echo Building client-only package...
 if errorlevel 1 goto :failed
 
 echo.
+echo Building portable manager and updater...
+"%PYTHON%" -m PyInstaller --noconfirm --clean build-manager.spec
+if errorlevel 1 goto :failed
+"%PYTHON%" -m PyInstaller --noconfirm --clean build-update-helper.spec
+if errorlevel 1 goto :failed
+
+copy /y "dist\start_manager.exe" "dist\CapsWriter-Offline\start_manager.exe" >nul
+if errorlevel 1 goto :failed
+copy /y "dist\CapsWriter-Update.exe" "dist\CapsWriter-Offline\CapsWriter-Update.exe" >nul
+if errorlevel 1 goto :failed
+
+echo.
 echo Build complete. Executables are here:
 echo   dist\CapsWriter-Offline\start_server.exe
 echo   dist\CapsWriter-Offline\start_client.exe
+echo   dist\CapsWriter-Offline\start_manager.exe
 echo   dist\CapsWriter-Offline-Client\start_client.exe
 echo.
 echo Note: the build uses directory junctions for models, assets, and source folders.

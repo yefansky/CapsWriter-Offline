@@ -9,6 +9,13 @@ set "PYTHONW=%VENV%\Scripts\pythonw.exe"
 echo.
 echo === CapsWriter-Offline source runner ===
 
+if exist "start_manager.exe" (
+    echo Starting the portable CapsWriter manager...
+    start "" /b "%~dp0start_manager.exe" --restart
+    echo Started. Missing models will download and verify automatically on first use.
+    exit /b 0
+)
+
 if not exist "%PYTHON%" (
     echo Creating Python 3.11 virtual environment...
     py -3.11 -m venv "%VENV%"
@@ -33,7 +40,7 @@ start "" /b "%PYTHONW%" start_manager.py --restart
 
 echo.
 echo Started. The manager is the only taskbar entry and owns the local engine.
-echo If recognition fails, download and unpack an ASR model under models\ first.
+echo If the selected model is missing, first startup downloads and verifies it automatically.
 exit /b 0
 
 :failed

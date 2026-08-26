@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_sub
 # from PyInstaller.building.build_main import Analysis, COLLECT
 from os.path import join, basename, dirname, exists
 from os import walk, makedirs
-from shutil import copyfile, rmtree
+from shutil import copyfile, copytree, ignore_patterns, rmtree
 
 # ==================== 打包配置选项 ====================
 
@@ -251,6 +251,8 @@ my_files = [
     'hot.txt',
     'hot-server.txt',
     'hot-rule.txt',
+    'run.bat',
+    'release.json',
     'readme.md',
     'LICENSE'
 ]
@@ -279,21 +281,18 @@ for file in my_files:
     copyfile(file, dest_file)
 
 
-# 为 models 文件夹建立链接，免去复制大文件
-from platform import system
-from subprocess import run
-
-if system() == 'Windows':
-    link_folders = ['models', 'assets', 'core', 'LLM', 'docs', 'log']  
-    for folder in link_folders:
-        if not exists(folder):
-            continue
-        dest_folder = join(dest_root, folder)
-        if exists(dest_folder):
-            rmtree(dest_folder)
-        # 使用管理员权限运行的命令提示符来创建目录连接符
-        cmd = ['mklink', '/j', dest_folder, folder]
-        try:
-            run(cmd, shell=True, check=True)
-        except:
-            print(f'警告：无法创建目录连接符 {dest_folder}，请手动创建或复制文件夹')
+# 发行包必须独立运行，不能依赖构建机或源码目录中的目录链接。
+# 模型不随软件包分发；首次运行时由 model_download.py 自动下载。
+copy_folders = ['assets', 'core', 'LLM', 'docs']
+for folder in copy_folders:
+    if not exists(folder):
+        continue
+    dest_folder = join(dest_root, folder)
+    if exists(dest_folder):
+        rmtree(dest_folder)
+    copytree(
+        folder,
+        dest_folder,
+        ignore=ignore_patterns('__pycache__', 'export', '*.pyc', '*.bak'),
+    )
+makedirs(join(dest_root, 'models'), exist_ok=True)

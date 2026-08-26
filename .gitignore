@@ -148,6 +148,7 @@ cython_debug/
 # 模型文件（体积巨大，只保留下载链接）
 models/*/*/
 models/*.py
+models/.downloads/
 
 # 日志与按年归档的文件夹（如 2026/01/...）
 20*/
@@ -178,6 +179,7 @@ test_*.md
 test_*.txt
 !tests/
 !tests/test_runtime_manager.py
+!tests/test_model_download.py
 stocks.txt 
 example_*.py
 example_.ipynb
@@ -186,6 +188,7 @@ file_*.txt
 *summary*.md
 
 release
+release.json
 *.dll 
 *.exe
 

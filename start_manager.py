@@ -22,6 +22,13 @@ from typing import Any
 from config_server import ServerConfig
 from core.client.audio.devices import preferred_input_device
 from core.runtime_settings import ROOT_DIR, load_settings, save_settings
+from core.software_update import (
+    INSTALLER_ASSET,
+    UpdateCheckError,
+    check_for_update,
+    is_installed,
+    load_release_info,
+)
 from core.startup import is_startup_enabled, set_startup_enabled
 
 
@@ -30,6 +37,15 @@ HOT_FILE = ROOT_DIR / "hot.txt"
 RULE_FILE = ROOT_DIR / "hot-rule.txt"
 SERVER_HOT_FILE = ROOT_DIR / "hot-server.txt"
 MUTEX_NAME = "Local\\CapsWriterOfflineManager"
+
+
+def runtime_command(script_name: str) -> list[str]:
+    """源码走 Python；完整发行包中的管理器改为直接启动冻结后的 exe。"""
+    if getattr(sys, "frozen", False):
+        executable = ROOT_DIR / f"{Path(script_name).stem}.exe"
+        if executable.is_file():
+            return [str(executable)]
+    return [sys.executable, script_name]
 
 
 class InstanceGuard:
@@ -558,6 +574,15 @@ class CapsWriterManager(tk.Tk):
         self.startup_button.pack(anchor="w")
         self._refresh_startup_setting()
 
+        update_card = tk.Frame(self.system_tab, background="#2D2D30", highlightthickness=1, highlightbackground="#3E3E42", padx=18, pady=16)
+        update_card.pack(fill="x", pady=(12, 0))
+        tk.Label(update_card, text="软件更新", background="#2D2D30", foreground="#FFFFFF", font=("Arial", 12, "bold"), anchor="w").pack(anchor="w")
+        self.update_detail = tk.Label(update_card, background="#2D2D30", foreground="#A7A7A7", font=("Arial", 10), anchor="w", justify="left")
+        self.update_detail.pack(anchor="w", pady=(5, 12))
+        self.update_button = ttk.Button(update_card, text="检查更新", command=self.check_for_updates, style="Accent.TButton")
+        self.update_button.pack(anchor="w")
+        self._refresh_update_setting()
+
     def _refresh_startup_setting(self) -> None:
         enabled = is_startup_enabled()
         self.startup_detail.configure(text="已启用：登录后自动启动本地输入管理器。" if enabled else "未启用：需要手动运行 install.bat 或 run.bat。")
@@ -572,6 +597,98 @@ class CapsWriterManager(tk.Tk):
             return
         self._refresh_startup_setting()
         self.status.configure(text="已开启随系统启动" if enabled else "已关闭随系统启动")
+
+    def _refresh_update_setting(self) -> None:
+        info = load_release_info()
+        if not info.update_enabled:
+            self.update_detail.configure(text="当前为源码开发目录；不会自动覆盖本地代码。请使用 git pull 获取更新。")
+            self.update_button.configure(state="disabled")
+            return
+        if is_installed():
+            self.update_detail.configure(text=f"当前版本：{info.tag}。可安全下载并安装最新正式版。")
+        else:
+            self.update_detail.configure(text=f"当前绿色版：{info.tag}。可检查新版本；绿色包不会自动覆盖原目录。")
+        self.update_button.configure(state="normal")
+
+    def check_for_updates(self) -> None:
+        info = load_release_info()
+        if not info.update_enabled:
+            return
+        self.update_button.configure(state="disabled")
+        self.status.configure(text="正在检查 GitHub 最新 Release…")
+        import threading
+
+        def worker() -> None:
+            try:
+                candidate = check_for_update(info)
+            except UpdateCheckError as exc:
+                self.after(0, lambda: self._update_check_failed(str(exc)))
+                return
+            self.after(0, lambda: self._update_check_done(candidate))
+
+        threading.Thread(target=worker, name="capswriter-update-check", daemon=True).start()
+
+    def _update_check_failed(self, detail: str) -> None:
+        self.update_button.configure(state="normal")
+        self.status.configure(text="检查更新失败，请检查网络后重试")
+        messagebox.showerror("无法检查更新", detail, parent=self)
+
+    def _update_check_done(self, candidate) -> None:
+        self.update_button.configure(state="normal")
+        if candidate is None:
+            self.status.configure(text="当前已经是最新版本")
+            messagebox.showinfo("CapsWriter 更新", "当前已经是最新版本。", parent=self)
+            return
+        if not is_installed():
+            self.status.configure(text=f"发现新绿色版 {candidate.tag}")
+            messagebox.showinfo(
+                "发现新版本",
+                f"发现 {candidate.tag}。绿色包为避免覆盖你可能修改过的文件，不会自动替换原目录。\n\n"
+                f"请到发布页下载新的绿色包：\n{candidate.release_url}",
+                parent=self,
+            )
+            return
+        approved = messagebox.askyesno(
+            "发现新版本",
+            f"发现 {candidate.tag}。现在下载、校验并安装吗？\n\n"
+            "更新时会先停止当前识别引擎，完成后自动启动新版。",
+            parent=self,
+        )
+        if approved:
+            self._start_software_update(candidate)
+
+    def _start_software_update(self, candidate) -> None:
+        helper = ROOT_DIR / "CapsWriter-Update.exe"
+        restart_exe = ROOT_DIR / "start_manager.exe"
+        if not helper.is_file() or not restart_exe.is_file():
+            messagebox.showerror("无法更新", "当前安装包缺少更新组件，请手动下载安装最新版本。", parent=self)
+            return
+        try:
+            # 安装包会覆盖应用目录。先把更新助手拷到临时目录再执行，避免 Windows
+            # 因 CapsWriter-Update.exe 仍在运行而拒绝替换当前版本。
+            import shutil
+            import tempfile
+            safe_tag = re.sub(r"[^A-Za-z0-9._-]", "_", candidate.tag)
+            staged_helper = Path(tempfile.gettempdir()) / f"CapsWriter-Update-{safe_tag}.exe"
+            shutil.copy2(helper, staged_helper)
+            self.stop_engine()
+            subprocess.Popen(
+                [
+                    str(staged_helper),
+                    "--tag", candidate.tag,
+                    "--installer-url", candidate.installer_url,
+                    "--checksum-url", candidate.checksum_url,
+                    "--asset-name", INSTALLER_ASSET,
+                    "--restart-exe", str(restart_exe),
+                ],
+                cwd=str(ROOT_DIR),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError as exc:
+            messagebox.showerror("无法启动更新", str(exc), parent=self)
+            return
+        self.status.configure(text="更新助手已启动，正在关闭当前版本…")
+        self.after(100, self.shutdown)
 
     def _refresh_rule_table(self) -> None:
         self.rule_table.delete(*self.rule_table.get_children())
@@ -870,16 +987,16 @@ class CapsWriterManager(tk.Tk):
         self._engine_generation += 1
         generation = self._engine_generation
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self._server_process = subprocess.Popen([sys.executable, "start_server.py", "--managed"], cwd=ROOT_DIR, creationflags=flags)
+        self._server_process = subprocess.Popen([*runtime_command("start_server.py"), "--managed"], cwd=ROOT_DIR, creationflags=flags)
         self.children_processes.append(self._server_process)
-        self.status.configure(text="正在加载本地识别模型，输入引擎将在就绪后自动连接…")
+        self.status.configure(text="正在准备本地识别模型；首次缺失时会自动下载，请在运行日志查看进度…")
         import threading
         threading.Thread(target=self._start_client_when_server_ready, args=(generation, self._server_process), name="capswriter-engine-start", daemon=True).start()
 
     def _start_client_when_server_ready(self, generation: int, server_process: subprocess.Popen) -> None:
         """等待服务端端口就绪再启动录音客户端，避免首次连接失败导致按键无输出。"""
         import socket
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + ServerConfig.engine_start_timeout
         while time.monotonic() < deadline:
             if generation != self._engine_generation:
                 return
@@ -899,7 +1016,7 @@ class CapsWriterManager(tk.Tk):
             return
 
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self._client_process = subprocess.Popen([sys.executable, "start_client.py", "--managed"], cwd=ROOT_DIR, creationflags=flags)
+        self._client_process = subprocess.Popen([*runtime_command("start_client.py"), "--managed"], cwd=ROOT_DIR, creationflags=flags)
         self.children_processes.append(self._client_process)
         self._tray_commands.put("engine_ready")
 

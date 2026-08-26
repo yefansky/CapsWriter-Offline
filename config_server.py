@@ -26,6 +26,12 @@ class ServerConfig:
     log_level = 'DEBUG'        # 日志级别：'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
     aligner_idle_timeout = 10  # 对齐引擎空闲多少秒后自动释放显存 (0 表示不释放)
 
+    # 模型自动下载
+    auto_download_models = True              # 缺少当前模型时从官方 Release 自动下载
+    qwen_asr_download_variant = 'q4_k'        # 可选：'q4_k'（体积小）或 'q5_k'（精度略高）
+    model_download_timeout = 60               # 单次网络读写超时（秒），下载支持断点续传
+    engine_start_timeout = 7200               # 首次下载大模型时，管理器最多等待服务端就绪的秒数
+
     # GPU 预加速配置（有识别任务时，提前调高显存频率，降低延迟，需管理员权限运行）
     gpu_boost_enabled = False                   # 总开关，默认关闭
     gpu_boost_cmd = 'nvidia-smi -lmc 9000'      # GPU 预加速命令，锁定显存频率到9000MHz（根据实际 GPU 调整）
@@ -43,6 +49,10 @@ class ModelDownloadLinks:
     """模型下载链接配置"""
     # 统一导向 GitHub Release 模型页面
     models_page = "https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models"
+    release_assets = os.environ.get(
+        "CAPSWRITER_MODEL_BASE_URL",
+        "https://github.com/HaujetZhao/CapsWriter-Offline/releases/download/models",
+    )
 
 
 class ModelPaths:
@@ -173,4 +183,3 @@ class ForceAlignerGGUFArgs:
     # 对齐细节
     n_ctx = 3072                # 上下文窗口大小
     dml_pad_to = 30             # 开启 DirectML 加速时，短音频统一填充到指定长度，有加速效果
-

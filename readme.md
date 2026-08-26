@@ -72,9 +72,11 @@ CapsWriter 的特别之处在于追求：
 ## 🎬 快速开始
 
 1.  **准备环境**：确保安装了 [VC++ 运行库](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)。若要使用文件转录功能，还需安装 [ffmpeg](https://ffmpeg.org/download.html) 并确保其在系统 PATH 中。
-2.  **下载解压**：下载 [Latest Release](https://github.com/HaujetZhao/CapsWriter-Offline/releases/latest) 里的软件本体，再到 [Models Release](https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models) 下载模型压缩包，将模型解压，放入 `models` 文件夹中对应模型的文件夹里。
-3.  **启动本地输入管理器**：从源码双击 `run.bat`（或运行 `start_manager.py`）。管理器是唯一的任务栏入口，会自动启动本地识别引擎。
+2.  **下载软件**：普通用户下载 [Latest Release](https://github.com/yefansky/CapsWriter-Offline/releases/latest) 中的安装包；想解压即用则下载绿色 ZIP。模型不再要求手工预先下载。
+3.  **启动本地输入管理器**：从源码双击 `run.bat`（或运行 `start_manager.py`）。管理器是唯一的任务栏入口，会自动启动本地识别引擎；首次缺少当前模型时，会从 [Models Release](https://github.com/HaujetZhao/CapsWriter-Offline/releases/tag/models) 自动断点下载、校验并安装。
 4.  **开始录音**：按住 `CapsLock键` 或 `鼠标侧键X2` 就可以说话了！
+
+安装版支持在管理器的“系统设置 → 软件更新”中一键检查、校验并安装最新版；绿色版下载解压后直接双击 `run.bat`。完整说明见 [安装、更新与绿色版](docs/安装、更新与绿色版.md)。
 
 ### 从本仓库运行或构建
 
@@ -84,7 +86,7 @@ CapsWriter 的特别之处在于追求：
   - `dist/CapsWriter-Offline/start_client.exe`
   - `dist/CapsWriter-Offline-Client/start_client.exe`
 
-首次运行或构建需要联网下载 Python 依赖和 llama.cpp Vulkan 运行库。识别功能仍需要按[模型下载说明](docs/模型下载的若干问题.md)将模型放进 `models/`；模型文件没有提交到 Git 仓库。
+首次运行或构建需要联网下载 Python 依赖、llama.cpp Vulkan 运行库和当前选择的识别模型。模型安装完成后，日常识别仍完全离线；下载进度和失败原因可在管理器的“运行日志”中查看。详见[模型下载说明](docs/模型下载的若干问题.md)。
 
 
 ## ⚙️ 个性化配置
