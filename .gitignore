@@ -30,6 +30,8 @@ MANIFEST
 # 通常这些文件由脚本生成，可能包含本地路径
 *.manifest
 *.spec
+!build-manager.spec
+!build-update-helper.spec
 *.zip
 
 # 安装日志
@@ -180,6 +182,7 @@ test_*.txt
 !tests/
 !tests/test_runtime_manager.py
 !tests/test_model_download.py
+!tests/test_software_update.py
 stocks.txt 
 example_*.py
 example_.ipynb
