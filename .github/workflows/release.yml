@@ -59,6 +59,7 @@ jobs:
           python -m PyInstaller --noconfirm --clean build.spec
           python -m PyInstaller --noconfirm --clean build-manager.spec
           python -m PyInstaller --noconfirm --clean build-update-helper.spec
+          python scripts\verify_manager_bundle.py dist\start_manager.exe
           Copy-Item dist\start_manager.exe dist\CapsWriter-Offline\start_manager.exe -Force
           Copy-Item dist\CapsWriter-Update.exe dist\CapsWriter-Offline\CapsWriter-Update.exe -Force
 

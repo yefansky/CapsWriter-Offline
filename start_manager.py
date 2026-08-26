@@ -14,9 +14,10 @@ import subprocess
 import sys
 import time
 import tkinter as tk
+import tkinter.simpledialog as simpledialog
 import sounddevice as sd
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, ttk
 from typing import Any
 
 from config_server import ServerConfig

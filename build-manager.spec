@@ -7,6 +7,13 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files
 binaries = []
 datas = []
 hiddenimports = [
+    # PyInstaller may treat ``from tkinter import ...`` names as package
+    # attributes and omit these stdlib submodules from the frozen bundle.
+    # Keep the manager's Tk dependencies explicit because target machines do
+    # not have the build machine's Python installation as a fallback.
+    'tkinter.messagebox',
+    'tkinter.simpledialog',
+    'tkinter.ttk',
     'sounddevice',
     'pynput',
     'pystray',

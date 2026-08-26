@@ -183,6 +183,7 @@ test_*.txt
 !tests/test_runtime_manager.py
 !tests/test_model_download.py
 !tests/test_software_update.py
+!tests/test_release_build.py
 stocks.txt 
 example_*.py
 example_.ipynb
