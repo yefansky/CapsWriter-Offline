@@ -62,6 +62,7 @@ jobs:
           python scripts\verify_manager_bundle.py dist\start_manager.exe
           Copy-Item dist\start_manager.exe dist\CapsWriter-Offline\start_manager.exe -Force
           Copy-Item dist\CapsWriter-Update.exe dist\CapsWriter-Offline\CapsWriter-Update.exe -Force
+          python scripts\smoke_manager_layout.py dist\CapsWriter-Offline\start_manager.exe
 
       - name: Build per-user Windows installer
         shell: pwsh
