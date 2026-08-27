@@ -23,6 +23,7 @@ from typing import Any
 from config_server import ServerConfig
 from core.client.audio.devices import preferred_input_device
 from core.runtime_settings import ROOT_DIR, load_settings, save_settings
+from core.runtime_self_test import run_frozen_runtime_self_test
 from core.software_update import (
     INSTALLER_ASSET,
     UpdateCheckError,
@@ -1057,7 +1058,12 @@ def main() -> None:
     parser.add_argument("--enable-startup", action="store_true")
     parser.add_argument("--disable-startup", action="store_true")
     parser.add_argument("--stop", action="store_true")
+    parser.add_argument("--self-test", type=Path)
     args = parser.parse_args()
+    if args.self_test:
+        if not run_frozen_runtime_self_test(args.self_test):
+            raise SystemExit(1)
+        return
     if args.stop:
         stop_previous_manager()
     if args.enable_startup:

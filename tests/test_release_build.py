@@ -16,6 +16,10 @@ from verify_manager_bundle import (  # noqa: E402
     normalise_module_name,
 )
 from smoke_manager_layout import run_manager_smoke  # noqa: E402
+from core.runtime_self_test import (  # noqa: E402
+    forbidden_module_origins,
+    forbidden_sys_path_entries,
+)
 
 
 class ReleaseBuildTest(unittest.TestCase):
@@ -86,6 +90,28 @@ class ReleaseBuildTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "import failed"):
                     run_manager_smoke(manager)
 
+    def test_runtime_self_test_rejects_system_site_packages(self):
+        executable_dir = Path(r"C:\clean\CapsWriter-Offline")
+        bundle_dir = Path(r"C:\clean\temp\_MEI123")
+        forbidden = forbidden_sys_path_entries(
+            [str(executable_dir), str(bundle_dir), r"C:\Python311\Lib\site-packages"],
+            executable_dir,
+            bundle_dir,
+        )
+        self.assertEqual(forbidden, [str(Path(r"C:\Python311\Lib\site-packages").resolve())])
+
+    def test_runtime_self_test_rejects_sibling_internal_dependency(self):
+        executable_dir = Path(r"C:\clean\CapsWriter-Offline")
+        bundle_dir = Path(r"C:\clean\temp\_MEI123")
+        errors = forbidden_module_origins(
+            {"tkinter.simpledialog": str(executable_dir / "internal" / "tkinter" / "simpledialog.pyc")},
+            {"config_server": str(executable_dir / "config_server.py")},
+            executable_dir,
+            bundle_dir,
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("outside the manager bundle", errors[0])
+
     def test_archive_entry_names_are_normalised(self):
         self.assertEqual(
             normalise_module_name(r"tkinter\simpledialog.pyc"),
@@ -116,7 +142,7 @@ class ReleaseBuildTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            r"python scripts\verify_manager_bundle.py dist\start_manager.exe",
+            r"$env:BUILD_PYTHON scripts\verify_manager_bundle.py dist\start_manager.exe",
             workflow_text,
         )
 
@@ -125,9 +151,36 @@ class ReleaseBuildTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            r"python scripts\smoke_manager_layout.py dist\CapsWriter-Offline\start_manager.exe",
+            r"$env:BUILD_PYTHON scripts\smoke_manager_layout.py dist\CapsWriter-Offline\start_manager.exe",
             workflow_text,
         )
+
+    def test_release_build_uses_an_isolated_virtual_environment(self):
+        workflow_text = (ROOT_DIR / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(r"python -m venv .venv-build", workflow_text)
+        self.assertIn(r".venv-build\Scripts\python.exe", workflow_text)
+
+    def test_release_has_a_dependency_free_runtime_job(self):
+        workflow_text = (ROOT_DIR / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        clean_job = workflow_text.split("  clean-runtime-smoke:", maxsplit=1)[1]
+        clean_job = clean_job.split("  publish-release:", maxsplit=1)[0]
+        self.assertIn("actions/download-artifact", clean_job)
+        self.assertNotIn("actions/setup-python", clean_job)
+        self.assertNotIn("pip install", clean_job)
+        self.assertIn("--self-test", clean_job)
+        self.assertIn("$env:PYTHONHOME", clean_job)
+        self.assertIn("$env:PYTHONPATH", clean_job)
+
+    def test_release_waits_for_clean_runtime_smoke_before_publishing(self):
+        workflow_text = (ROOT_DIR / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish_job = workflow_text.split("  publish-release:", maxsplit=1)[1]
+        self.assertIn("needs: clean-runtime-smoke", publish_job)
 
 
 if __name__ == "__main__":

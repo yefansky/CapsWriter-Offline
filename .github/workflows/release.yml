@@ -14,16 +14,18 @@ on:
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: v2.6.${{ github.run_number }}
+  PYTHONUTF8: "1"
+  BUILD_PYTHON: .venv-build\Scripts\python.exe
+
 concurrency:
   group: capswriter-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build-and-release:
+  build-release-assets:
     runs-on: windows-latest
-    env:
-      RELEASE_TAG: v2.6.${{ github.run_number }}
-      PYTHONUTF8: "1"
 
     steps:
       - name: Check out the exact commit to release
@@ -38,31 +40,32 @@ jobs:
             requirements-server.txt
             requirements-client.txt
 
-      - name: Install build dependencies and llama runtime
+      - name: Create isolated build environment
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-server.txt -r requirements-client.txt
+          python -m venv .venv-build
+          & $env:BUILD_PYTHON -m pip install --upgrade pip
+          & $env:BUILD_PYTHON -m pip install -r requirements-server.txt -r requirements-client.txt
           .\setup_llama_runtime.bat
 
       - name: Run unit tests
         shell: pwsh
-        run: python -m unittest discover -s tests -v
+        run: '& $env:BUILD_PYTHON -m unittest discover -s tests -v'
 
       - name: Prepare immutable version metadata
         shell: pwsh
-        run: python scripts\prepare_release.py --tag "$env:RELEASE_TAG" --repository "$env:GITHUB_REPOSITORY"
+        run: '& $env:BUILD_PYTHON scripts\prepare_release.py --tag "$env:RELEASE_TAG" --repository "$env:GITHUB_REPOSITORY"'
 
       - name: Build portable Windows executables
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean build.spec
-          python -m PyInstaller --noconfirm --clean build-manager.spec
-          python -m PyInstaller --noconfirm --clean build-update-helper.spec
-          python scripts\verify_manager_bundle.py dist\start_manager.exe
+          & $env:BUILD_PYTHON -m PyInstaller --noconfirm --clean build.spec
+          & $env:BUILD_PYTHON -m PyInstaller --noconfirm --clean build-manager.spec
+          & $env:BUILD_PYTHON -m PyInstaller --noconfirm --clean build-update-helper.spec
+          & $env:BUILD_PYTHON scripts\verify_manager_bundle.py dist\start_manager.exe
           Copy-Item dist\start_manager.exe dist\CapsWriter-Offline\start_manager.exe -Force
           Copy-Item dist\CapsWriter-Update.exe dist\CapsWriter-Offline\CapsWriter-Update.exe -Force
-          python scripts\smoke_manager_layout.py dist\CapsWriter-Offline\start_manager.exe
+          & $env:BUILD_PYTHON scripts\smoke_manager_layout.py dist\CapsWriter-Offline\start_manager.exe
 
       - name: Build per-user Windows installer
         shell: pwsh
@@ -75,7 +78,7 @@ jobs:
 
       - name: Package portable ZIP and checksums
         shell: pwsh
-        run: python scripts\package_release.py --tag "$env:RELEASE_TAG"
+        run: '& $env:BUILD_PYTHON scripts\package_release.py --tag "$env:RELEASE_TAG"'
 
       - name: Retain build output for diagnosis
         uses: actions/upload-artifact@v4
@@ -85,8 +88,73 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  clean-runtime-smoke:
+    needs: build-release-assets
+    runs-on: windows-latest
+
+    steps:
+      - name: Download packaged release only
+        uses: actions/download-artifact@v4
+        with:
+          name: CapsWriter-Offline-${{ env.RELEASE_TAG }}
+          path: release
+
+      - name: Start packaged manager without Python or project dependencies
+        shell: pwsh
+        run: |
+          $cleanRoot = Join-Path $env:RUNNER_TEMP 'capswriter-clean-runtime'
+          $profileRoot = Join-Path $cleanRoot 'empty-profile'
+          $tempRoot = Join-Path $cleanRoot 'temp'
+          $poisonPython = Join-Path $cleanRoot 'missing-python'
+          New-Item -ItemType Directory -Path $profileRoot,$tempRoot,$poisonPython -Force | Out-Null
+          Expand-Archive -LiteralPath 'release\CapsWriter-Offline-Portable.zip' -DestinationPath $cleanRoot -Force
+          $appDir = Join-Path $cleanRoot 'CapsWriter-Offline'
+          $manager = Join-Path $appDir 'start_manager.exe'
+          $report = Join-Path $cleanRoot 'runtime-self-test.json'
+
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:PYTHONHOME = $poisonPython
+          $env:PYTHONPATH = $poisonPython
+          $env:USERPROFILE = $profileRoot
+          $env:APPDATA = Join-Path $profileRoot 'AppData\Roaming'
+          $env:LOCALAPPDATA = Join-Path $profileRoot 'AppData\Local'
+          $env:TEMP = $tempRoot
+          $env:TMP = $tempRoot
+          New-Item -ItemType Directory -Path $env:APPDATA,$env:LOCALAPPDATA -Force | Out-Null
+          if (Get-Command python -ErrorAction SilentlyContinue) {
+            throw 'Clean runtime PATH unexpectedly exposes Python.'
+          }
+
+          $process = Start-Process -FilePath $manager -WorkingDirectory $appDir -ArgumentList @('--self-test', "`"$report`"") -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id -Force
+            throw 'Frozen manager self-test timed out; an exception dialog may be blocking.'
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "Frozen manager self-test exited with code $($process.ExitCode)."
+          }
+          if (-not (Test-Path -LiteralPath $report)) {
+            throw 'Frozen manager did not produce runtime provenance evidence.'
+          }
+          $evidence = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if ($evidence.status -ne 'passed' -or $evidence.errors.Count -ne 0) {
+            throw "Runtime isolation failed: $($evidence.errors -join '; ')"
+          }
+          Write-Host "Clean runtime self-test passed with Tcl $($evidence.tclPatchlevel)."
+
+  publish-release:
+    needs: clean-runtime-smoke
+    if: github.event_name == 'push' || inputs.publish == true
+    runs-on: windows-latest
+
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: CapsWriter-Offline-${{ env.RELEASE_TAG }}
+          path: release
+
       - name: Publish GitHub Release
-        if: github.event_name == 'push' || inputs.publish == true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
