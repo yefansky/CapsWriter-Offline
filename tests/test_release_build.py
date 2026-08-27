@@ -182,6 +182,13 @@ class ReleaseBuildTest(unittest.TestCase):
         publish_job = workflow_text.split("  publish-release:", maxsplit=1)[1]
         self.assertIn("needs: clean-runtime-smoke", publish_job)
 
+    def test_release_uses_explicit_repository_without_checkout(self):
+        workflow_text = (ROOT_DIR / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        publish_job = workflow_text.split("  publish-release:", maxsplit=1)[1]
+        self.assertIn('--repo "$env:GITHUB_REPOSITORY"', publish_job)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -158,4 +158,4 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:RELEASE_TAG" release\* --target "$env:GITHUB_SHA" --title "CapsWriter Offline $env:RELEASE_TAG" --generate-notes --latest
+        run: gh release create "$env:RELEASE_TAG" release\* --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --title "CapsWriter Offline $env:RELEASE_TAG" --generate-notes --latest
