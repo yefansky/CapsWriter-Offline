@@ -9,6 +9,12 @@ import sounddevice as sd
 from core.runtime_settings import load_settings, save_settings
 from core.client.audio.stream import AudioStreamManager
 from core.client.audio.devices import input_candidates, is_remote_input, is_unsuitable_input
+from core.client.audio.device_events import (
+    AudioEndpointEvent,
+    DEVICE_STATE_ACTIVE,
+    DEVICE_STATE_UNPLUGGED,
+    WindowsAudioEndpointWatcher,
+)
 from core.client.shortcut.shortcut_config import Shortcut
 from core.client.shortcut.task import ShortcutTask
 from core.client.audio.file_manager import _CREATE_NO_WINDOW
@@ -19,6 +25,7 @@ from start_manager import (
     log_line_tag,
     microphone_status_text,
     read_rule_rows,
+    reconnect_log_excerpt,
     server_hotword_help,
     server_hotword_supported,
     write_rule_rows,
@@ -60,7 +67,8 @@ class MicrophoneRecoveryTests(unittest.TestCase):
         manager = AudioStreamManager(app)
         manager._running = False
         manager._monitor_stop = Mock()
-        manager._monitor_stop.wait.side_effect = [False, True]
+        manager._monitor_stop.is_set.side_effect = [False, False, True]
+        manager._monitor_wake = Mock()
         manager.start = Mock()
         with patch("core.client.audio.stream.preferred_input_device", return_value={"index": 7, "name": "USB Mic", "hostapi": 0}) as preferred:
             manager._monitor_devices()
@@ -94,32 +102,79 @@ class MicrophoneRecoveryTests(unittest.TestCase):
             candidates = input_candidates(refresh_if_empty=False)
         self.assertEqual(candidates, [])
 
-    def test_three_empty_results_request_reopen_after_recording(self):
+    def test_reconnected_capture_endpoint_reopens_once_for_duplicate_notifications(self):
         app = Mock(); app.state.stream = None; app.state.recording = False
         manager = AudioStreamManager(app)
-        manager._running = True
-        manager._monitor_stop = Mock()
-        manager._monitor_stop.wait.side_effect = [False, True]
-        manager.reopen = Mock()
+        manager._endpoint_watcher = Mock()
+        manager._endpoint_watcher.is_capture_endpoint.return_value = True
+        manager.reopen = Mock(return_value=Mock())
 
-        manager.observe_recognition_result("")
-        manager.observe_recognition_result("  ")
-        manager.observe_recognition_result("")
-        manager._monitor_devices()
+        manager._enqueue_audio_endpoint_event(AudioEndpointEvent("added", "mic-1"))
+        manager._enqueue_audio_endpoint_event(
+            AudioEndpointEvent("state_changed", "mic-1", state_id=DEVICE_STATE_ACTIVE)
+        )
+        manager._drain_audio_endpoint_events()
+        manager._pending_reconnects["mic-1"] = 0
 
+        self.assertTrue(manager._reopen_for_reconnected_endpoints())
+        manager.reopen.assert_called_once()
+        self.assertEqual(manager._pending_reconnects, {})
+        self.assertEqual(manager._confirmed_capture_reconnects, set())
+
+    def test_reconnect_waits_for_current_recording_then_reopens_once(self):
+        app = Mock(); app.state.stream = None; app.state.recording = True
+        manager = AudioStreamManager(app)
+        manager._endpoint_watcher = Mock()
+        manager._endpoint_watcher.is_capture_endpoint.return_value = True
+        manager.reopen = Mock(return_value=Mock())
+        manager._enqueue_audio_endpoint_event(AudioEndpointEvent("added", "mic-1"))
+        manager._drain_audio_endpoint_events()
+        manager._pending_reconnects["mic-1"] = 0
+
+        self.assertFalse(manager._reopen_for_reconnected_endpoints())
+        manager.reopen.assert_not_called()
+
+        app.state.recording = False
+        self.assertTrue(manager._reopen_for_reconnected_endpoints())
         manager.reopen.assert_called_once()
 
-    def test_non_empty_result_resets_empty_result_watchdog(self):
-        app = Mock(); app.state.stream = None
+    def test_render_endpoint_arrival_does_not_reopen_microphone(self):
+        app = Mock(); app.state.stream = None; app.state.recording = False
         manager = AudioStreamManager(app)
+        manager._endpoint_watcher = Mock()
+        manager._endpoint_watcher.is_capture_endpoint.return_value = False
+        manager.reopen = Mock(return_value=Mock())
+        manager._enqueue_audio_endpoint_event(AudioEndpointEvent("added", "speaker-1"))
+        manager._drain_audio_endpoint_events()
+        manager._pending_reconnects["speaker-1"] = 0
 
-        manager.observe_recognition_result("")
-        manager.observe_recognition_result("")
-        manager.observe_recognition_result("恢复正常")
-        manager.observe_recognition_result("")
+        self.assertFalse(manager._reopen_for_reconnected_endpoints())
+        manager.reopen.assert_not_called()
+        self.assertEqual(manager._pending_reconnects, {})
 
-        self.assertEqual(manager._consecutive_empty_results, 1)
-        self.assertIsNone(manager._pending_reopen_reason)
+    def test_offline_then_active_creates_a_new_reconnect_generation(self):
+        app = Mock(); app.state.stream = None; app.state.recording = False
+        manager = AudioStreamManager(app)
+        manager._endpoint_watcher = Mock()
+        manager._endpoint_watcher.is_capture_endpoint.return_value = True
+        manager.reopen = Mock(return_value=Mock())
+
+        manager._enqueue_audio_endpoint_event(AudioEndpointEvent("added", "mic-1"))
+        manager._drain_audio_endpoint_events()
+        manager._pending_reconnects["mic-1"] = 0
+        manager._reopen_for_reconnected_endpoints()
+
+        manager._enqueue_audio_endpoint_event(
+            AudioEndpointEvent("state_changed", "mic-1", state_id=DEVICE_STATE_UNPLUGGED)
+        )
+        manager._enqueue_audio_endpoint_event(
+            AudioEndpointEvent("state_changed", "mic-1", state_id=DEVICE_STATE_ACTIVE)
+        )
+        manager._drain_audio_endpoint_events()
+        manager._pending_reconnects["mic-1"] = 0
+        manager._reopen_for_reconnected_endpoints()
+
+        self.assertEqual(manager.reopen.call_count, 2)
 
     def test_remote_session_keeps_remote_audio_as_default(self):
         devices = [
@@ -138,7 +193,8 @@ class MicrophoneRecoveryTests(unittest.TestCase):
         manager = AudioStreamManager(app)
         manager._remote_session = True
         manager._monitor_stop = Mock()
-        manager._monitor_stop.wait.side_effect = [False, True]
+        manager._monitor_stop.is_set.side_effect = [False, False, True]
+        manager._monitor_wake = Mock()
         manager.reopen = Mock()
         with patch("core.client.audio.stream.is_remote_session", return_value=False):
             manager._monitor_devices()
@@ -152,7 +208,6 @@ class MicrophoneRecoveryTests(unittest.TestCase):
             {"index": 9, "name": "Working Mic", "hostapi": 0, "max_input_channels": 1},
         ]
         working_stream = Mock()
-        manager._pending_reopen_reason = "stale request"
         with (
             patch("core.client.audio.stream.input_candidates", return_value=candidates),
             patch(
@@ -163,7 +218,21 @@ class MicrophoneRecoveryTests(unittest.TestCase):
             self.assertIs(manager.start(), working_stream)
         self.assertEqual(input_stream.call_count, 2)
         self.assertEqual(manager._device_identity, (9, "Working Mic", 0))
-        self.assertIsNone(manager._pending_reopen_reason)
+
+    def test_windows_endpoint_watcher_registers_and_forwards_events(self):
+        events = []
+        watcher = WindowsAudioEndpointWatcher(events.append)
+        enumerator = Mock()
+        with patch("pycaw.utils.AudioUtilities.GetDeviceEnumerator", return_value=enumerator):
+            watcher.start()
+        callback = enumerator.RegisterEndpointNotificationCallback.call_args.args[0]
+
+        callback.on_device_added("mic-1")
+        callback.on_device_state_changed("mic-1", "Active", DEVICE_STATE_ACTIVE)
+
+        self.assertEqual([event.kind for event in events], ["added", "state_changed"])
+        watcher.stop()
+        enumerator.UnregisterEndpointNotificationCallback.assert_called_once_with(callback)
 
 
 class ManagedModeTests(unittest.TestCase):
@@ -229,12 +298,28 @@ class LogHighlightTests(unittest.TestCase):
         self.assertEqual(log_line_tag("10:00 DEBUG details"), "log_debug")
         self.assertEqual(log_line_tag("===== 客户端日志 ====="), "log_section")
 
+    def test_reconnect_excerpt_only_keeps_tagged_client_events(self):
+        client_log = "\n".join(
+            [
+                "10:00 INFO 普通客户端日志",
+                "10:01 INFO [麦克风重连] 检测到重新连接",
+                "10:02 INFO [麦克风重连] 音频流重建完成",
+            ]
+        )
+        excerpt = reconnect_log_excerpt(client_log)
+        self.assertNotIn("普通客户端日志", excerpt)
+        self.assertIn("检测到重新连接", excerpt)
+        self.assertIn("音频流重建完成", excerpt)
+
 
 class LogRefreshTests(unittest.TestCase):
     def build_manager(self):
         manager = Mock()
         manager._last_log_text = "旧日志"
-        manager._read_log_tail.side_effect = ["客户端新日志", "服务端新日志"]
+        manager._read_log_tail.side_effect = [
+            "客户端新日志\n10:01 INFO [麦克风重连] 音频流重建完成",
+            "服务端新日志",
+        ]
         manager.log_view.tag_ranges.return_value = ()
         manager.log_view.yview.return_value = (0.0, 1.0)
         manager.focus_get.return_value = None
@@ -261,6 +346,7 @@ class LogRefreshTests(unittest.TestCase):
         manager.log_view.delete.assert_called_once_with("1.0", "end")
         self.assertIn("客户端新日志", manager._last_log_text)
         self.assertIn("服务端新日志", manager._last_log_text)
+        self.assertTrue(manager._last_log_text.rstrip().endswith("[麦克风重连] 音频流重建完成"))
 
     def test_stale_selection_does_not_pause_refresh_after_focus_moves_away(self):
         manager = self.build_manager()

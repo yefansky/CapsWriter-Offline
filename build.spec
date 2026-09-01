@@ -76,6 +76,8 @@ hiddenimports += [
     'PIL.Image',
     'pystray',       # 托盘图标库
 ]
+hiddenimports += collect_submodules('pycaw')
+hiddenimports += collect_submodules('comtypes')
 
 # # 对所有模块用 .py 源码而非 .pyc（猴子补丁 _get_module_collection_mode）
 # import PyInstaller.building.build_main as _bm

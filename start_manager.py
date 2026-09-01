@@ -158,6 +158,14 @@ def log_line_tag(line: str) -> str | None:
     return None
 
 
+def reconnect_log_excerpt(client_log: str, max_lines: int = 40) -> str:
+    """提取客户端麦克风重连事件，固定放在运行日志底部便于观测。"""
+    lines = [line for line in client_log.splitlines() if "[麦克风重连]" in line]
+    if not lines:
+        return "暂无麦克风重连事件"
+    return "\n".join(lines[-max_lines:])
+
+
 def microphone_status_text(device: dict[str, Any]) -> str:
     """生成顶部状态栏的默认输入设备说明。"""
     return f"麦克风：已连接 · #{device['index']} {device.get('name', '未知设备')}"
@@ -874,8 +882,11 @@ class CapsWriterManager(tk.Tk):
 
     def refresh_logs(self, force: bool = False) -> None:
         """读取并重绘日志；手动刷新可越过当前文本选区。"""
-        content = "\n\n===== 客户端日志 =====\n" + self._read_log_tail(ROOT_DIR / "logs" / "client_latest.log")
-        content += "\n\n===== 服务端日志 =====\n" + self._read_log_tail(ROOT_DIR / "logs" / "server_latest.log")
+        client_log = self._read_log_tail(ROOT_DIR / "logs" / "client_latest.log")
+        server_log = self._read_log_tail(ROOT_DIR / "logs" / "server_latest.log")
+        content = "\n\n===== 客户端日志 =====\n" + client_log
+        content += "\n\n===== 服务端日志 =====\n" + server_log
+        content += "\n\n===== 麦克风重连事件（客户端） =====\n" + reconnect_log_excerpt(client_log)
         if content == self._last_log_text or (not force and self._log_selection_active()):
             return
         follow_tail = not self._last_log_text or self.log_view.yview()[1] >= 0.995
