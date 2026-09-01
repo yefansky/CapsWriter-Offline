@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import queue
 import time
 import threading
 from typing import TYPE_CHECKING, Optional
@@ -17,6 +18,12 @@ import sounddevice as sd
 
 from core.client.state import console
 from .devices import input_candidates, is_remote_session, preferred_input_device
+from .device_events import (
+    AudioEndpointEvent,
+    CAPTURE_FLOW_ID,
+    DEVICE_STATE_ACTIVE,
+    create_audio_endpoint_watcher,
+)
 from . import logger
 
 if TYPE_CHECKING:
@@ -43,7 +50,10 @@ class AudioStreamManager:
 
     SAMPLE_RATE = 48000
     BLOCK_DURATION = 0.05  # 50ms
-    EMPTY_RESULT_REOPEN_THRESHOLD = 3
+    DEVICE_MONITOR_INTERVAL = 5.0
+    RECONNECT_DEBOUNCE_SECONDS = 0.75
+    RECONNECT_RETRY_SECONDS = 0.5
+    RECONNECT_MAX_RESOLVE_ATTEMPTS = 3
 
     def __init__(self, app: CapsWriterClient):
         """
@@ -56,12 +66,19 @@ class AudioStreamManager:
         self._channels = 1
         self._running = False  # 标志是否应该运行
         self._monitor_stop = threading.Event()
+        self._monitor_wake = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._device_identity = None
         self._remote_session = is_remote_session()
         self._stream_lock = threading.RLock()
-        self._consecutive_empty_results = 0
-        self._pending_reopen_reason: Optional[str] = None
+        self._endpoint_watcher = None
+        self._endpoint_events: queue.SimpleQueue[AudioEndpointEvent] = queue.SimpleQueue()
+        self._endpoint_active: dict[str, bool] = {}
+        self._default_capture_endpoint_id: Optional[str] = None
+        self._pending_reconnects: dict[str, float] = {}
+        self._pending_reconnect_attempts: dict[str, int] = {}
+        self._confirmed_capture_reconnects: set[str] = set()
+        self._reconnect_wait_logged = False
 
     @property
     def state(self) -> ClientState:
@@ -158,8 +175,6 @@ class AudioStreamManager:
                     self._running = True
                     self._device_identity = (device_index, device.get('name'), device.get('hostapi'))
                     self._remote_session = is_remote_session()
-                    self._consecutive_empty_results = 0
-                    self._pending_reopen_reason = None
                     if not self.app.managed:
                         console.print(f'使用音频设备：[italic]{device_name}，声道数：{self._channels}', end='\n\n')
                     logger.info(f"音频流已绑定到输入设备: #{device_index} {device_name}")
@@ -188,37 +203,157 @@ class AudioStreamManager:
         if self._monitor_thread and self._monitor_thread.is_alive():
             return
         self._monitor_stop.clear()
+        self._monitor_wake.clear()
         self._monitor_thread = threading.Thread(target=self._monitor_devices, name="mic-device-monitor", daemon=True)
         self._monitor_thread.start()
+        try:
+            watcher = create_audio_endpoint_watcher(self._enqueue_audio_endpoint_event)
+            watcher.start()
+            self._endpoint_watcher = watcher
+            logger.info("[麦克风重连] Windows 音频端点监听已启动")
+        except Exception as exc:
+            self._endpoint_watcher = None
+            logger.error(f"[麦克风重连] Windows 音频端点监听启动失败: {exc}", exc_info=True)
 
-    def observe_recognition_result(self, text: str) -> None:
-        """记录最终识别结果，连续空结果时请求安全重建音频流。"""
-        with self._stream_lock:
-            if text.strip():
-                self._consecutive_empty_results = 0
+    def _enqueue_audio_endpoint_event(self, event: AudioEndpointEvent) -> None:
+        """Core Audio 回调只入队并唤醒监控线程，不能直接重建音频流。"""
+        self._endpoint_events.put(event)
+        self._monitor_wake.set()
+
+    @staticmethod
+    def _endpoint_label(endpoint_id: str) -> str:
+        return endpoint_id if len(endpoint_id) <= 56 else f"{endpoint_id[:28]}...{endpoint_id[-20:]}"
+
+    def _schedule_endpoint_reconnect(self, endpoint_id: str) -> None:
+        if not endpoint_id or endpoint_id in self._pending_reconnects:
+            return
+        self._pending_reconnects[endpoint_id] = time.monotonic() + self.RECONNECT_DEBOUNCE_SECONDS
+        self._pending_reconnect_attempts[endpoint_id] = 0
+        self._reconnect_wait_logged = False
+
+    def _drain_audio_endpoint_events(self) -> None:
+        """在监控线程里合并 Added/Active/DefaultChanged 等重复通知。"""
+        while True:
+            try:
+                event = self._endpoint_events.get_nowait()
+            except queue.Empty:
                 return
 
-            self._consecutive_empty_results += 1
-            if self._consecutive_empty_results < self.EMPTY_RESULT_REOPEN_THRESHOLD:
-                return
+            endpoint_id = event.endpoint_id
+            if event.kind == "removed" or (
+                event.kind == "state_changed" and event.state_id != DEVICE_STATE_ACTIVE
+            ):
+                self._endpoint_active[endpoint_id] = False
+                self._pending_reconnects.pop(endpoint_id, None)
+                self._pending_reconnect_attempts.pop(endpoint_id, None)
+                self._confirmed_capture_reconnects.discard(endpoint_id)
+                continue
 
-            self._consecutive_empty_results = 0
-            self._pending_reopen_reason = (
-                f"连续 {self.EMPTY_RESULT_REOPEN_THRESHOLD} 次最终识别为空，"
-                "音频流可能已进入静音假健康状态"
-            )
-            logger.warning(f"{self._pending_reopen_reason}，将在当前录音结束后自动恢复")
+            if event.kind == "default_changed":
+                if event.flow_id != CAPTURE_FLOW_ID:
+                    continue
+                if endpoint_id == self._default_capture_endpoint_id:
+                    continue
+                self._default_capture_endpoint_id = endpoint_id
+                self._endpoint_active[endpoint_id] = True
+                self._schedule_endpoint_reconnect(endpoint_id)
+                continue
+
+            if event.kind not in {"added", "state_changed"}:
+                continue
+            if event.kind == "state_changed" and event.state_id != DEVICE_STATE_ACTIVE:
+                continue
+            if self._endpoint_active.get(endpoint_id) is True:
+                continue
+            self._endpoint_active[endpoint_id] = True
+            self._schedule_endpoint_reconnect(endpoint_id)
+
+    def _next_monitor_delay(self) -> float:
+        if not self._pending_reconnects:
+            return self.DEVICE_MONITOR_INTERVAL
+        delay = min(self._pending_reconnects.values()) - time.monotonic()
+        if delay <= 0 and self.state.recording:
+            return 0.25
+        return max(0.0, min(self.DEVICE_MONITOR_INTERVAL, delay))
+
+    def _resolve_ready_capture_reconnects(self) -> None:
+        """防抖结束后确认事件属于捕获端点；暂不可查询时有限重试。"""
+        if self._endpoint_watcher is None:
+            return
+        now = time.monotonic()
+        ready_ids = [
+            endpoint_id
+            for endpoint_id, ready_at in self._pending_reconnects.items()
+            if ready_at <= now and endpoint_id not in self._confirmed_capture_reconnects
+        ]
+        for endpoint_id in ready_ids:
+            try:
+                is_capture = self._endpoint_watcher.is_capture_endpoint(endpoint_id)
+            except Exception as exc:
+                attempts = self._pending_reconnect_attempts.get(endpoint_id, 0) + 1
+                self._pending_reconnect_attempts[endpoint_id] = attempts
+                if attempts >= self.RECONNECT_MAX_RESOLVE_ATTEMPTS:
+                    self._pending_reconnects.pop(endpoint_id, None)
+                    self._pending_reconnect_attempts.pop(endpoint_id, None)
+                    logger.warning(
+                        "[麦克风重连] 无法确认重新上线端点是否为麦克风，已跳过: "
+                        f"endpoint={self._endpoint_label(endpoint_id)}, error={exc}"
+                    )
+                else:
+                    self._pending_reconnects[endpoint_id] = now + self.RECONNECT_RETRY_SECONDS
+                continue
+
+            if not is_capture:
+                self._pending_reconnects.pop(endpoint_id, None)
+                self._pending_reconnect_attempts.pop(endpoint_id, None)
+                continue
+            self._confirmed_capture_reconnects.add(endpoint_id)
+
+    def _reopen_for_reconnected_endpoints(self) -> bool:
+        """同一批重新上线的捕获端点只执行一次安全重开。"""
+        self._resolve_ready_capture_reconnects()
+        ready_capture_ids = [
+            endpoint_id
+            for endpoint_id in self._confirmed_capture_reconnects
+            if self._pending_reconnects.get(endpoint_id, float("inf")) <= time.monotonic()
+        ]
+        if not ready_capture_ids:
+            return False
+
+        labels = ", ".join(self._endpoint_label(endpoint_id) for endpoint_id in sorted(ready_capture_ids))
+        if self.state.recording:
+            if not self._reconnect_wait_logged:
+                logger.info(
+                    "[麦克风重连] 检测到麦克风重新连接，当前正在录音，"
+                    f"已挂起一次音频流重建: endpoint={labels}"
+                )
+                self._reconnect_wait_logged = True
+            return False
+
+        for endpoint_id in ready_capture_ids:
+            self._pending_reconnects.pop(endpoint_id, None)
+            self._pending_reconnect_attempts.pop(endpoint_id, None)
+            self._confirmed_capture_reconnects.discard(endpoint_id)
+        self._reconnect_wait_logged = False
+        logger.warning(
+            "[麦克风重连] 检测到麦克风重新连接，正在执行一次音频流重建: "
+            f"endpoint={labels}"
+        )
+        stream = self.reopen()
+        if stream is None:
+            logger.error("[麦克风重连] 音频流重建失败，将由设备监控继续恢复")
+        else:
+            logger.info("[麦克风重连] 音频流重建完成，已重新绑定可用麦克风")
+        return True
 
     def _monitor_devices(self) -> None:
-        while not self._monitor_stop.wait(5):
-            with self._stream_lock:
-                reopen_reason = self._pending_reopen_reason
-                can_reopen = bool(reopen_reason) and not self.state.recording
-                if can_reopen:
-                    self._pending_reopen_reason = None
-            if can_reopen:
-                logger.warning(f"{reopen_reason}，正在重新枚举麦克风")
-                self.reopen()
+        while not self._monitor_stop.is_set():
+            self._monitor_wake.wait(self._next_monitor_delay())
+            self._monitor_wake.clear()
+            if self._monitor_stop.is_set():
+                break
+            self._drain_audio_endpoint_events()
+            if self._reopen_for_reconnected_endpoints():
                 continue
 
             remote_session = is_remote_session()
@@ -270,7 +405,16 @@ class AudioStreamManager:
 
     def shutdown(self) -> None:
         """停止监控线程和音频流，仅供应用退出时调用。"""
+        if self._endpoint_watcher is not None:
+            try:
+                self._endpoint_watcher.stop()
+                logger.info("[麦克风重连] Windows 音频端点监听已停止")
+            except Exception as exc:
+                logger.warning(f"[麦克风重连] 停止 Windows 音频端点监听失败: {exc}")
+            finally:
+                self._endpoint_watcher = None
         self._monitor_stop.set()
+        self._monitor_wake.set()
         self.stop()
 
     def reopen(self) -> Optional[sd.InputStream]:

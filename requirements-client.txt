@@ -10,6 +10,7 @@ pynput
 pyclip
 sounddevice
 watchdog
+pycaw==20251023
 
 # network and api 
 websockets

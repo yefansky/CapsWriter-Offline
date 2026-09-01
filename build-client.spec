@@ -77,6 +77,8 @@ hiddenimports += [
     'pystray',       # 托盘图标库
     'rich._unicode_data.unicode17-0-0',
 ]
+hiddenimports += collect_submodules('pycaw')
+hiddenimports += collect_submodules('comtypes')
 
 a_2 = Analysis(
     ['start_client.py'],
