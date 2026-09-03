@@ -26,8 +26,11 @@ from start_manager import (
     microphone_status_text,
     read_rule_rows,
     reconnect_log_excerpt,
+    local_server_is_available,
+    force_stop_local_capswriter_server,
     server_hotword_help,
     server_hotword_supported,
+    stop_managed_process_tree,
     write_rule_rows,
 )
 from core.client.hotword.hot_phoneme import PhonemeCorrector
@@ -410,6 +413,41 @@ class MicrophoneStatusTests(unittest.TestCase):
             microphone_status_text({"index": 1, "name": "Wireless Mic Rx"}),
             "麦克风：已连接 · #1 Wireless Mic Rx",
         )
+
+
+class ManagedProcessTreeTests(unittest.TestCase):
+    def test_stopping_managed_process_ends_its_windows_process_tree(self):
+        process = Mock()
+        process.pid = 43210
+        process.poll.return_value = None
+        with patch("start_manager.subprocess.run") as taskkill:
+            stop_managed_process_tree(process)
+        taskkill.assert_called_once_with(
+            ["taskkill", "/PID", "43210", "/T", "/F"], capture_output=True, check=False,
+        )
+        process.wait.assert_called_once_with(timeout=4)
+        process.kill.assert_not_called()
+
+    def test_detects_running_local_server_before_starting_another(self):
+        with patch("start_manager.socket.create_connection") as connect:
+            self.assertTrue(local_server_is_available())
+        connect.assert_called_once_with(("127.0.0.1", 6016), timeout=0.3)
+
+    def test_treats_unreachable_local_server_as_absent(self):
+        with patch("start_manager.socket.create_connection", side_effect=OSError):
+            self.assertFalse(local_server_is_available())
+
+    def test_force_restart_refuses_listener_outside_current_capswriter_source(self):
+        listener = Mock(); listener.pid = 43210
+        listener.laddr.port = 6016
+        listener.status = "LISTEN"
+        process = Mock(); process.cmdline.return_value = ["python", "other_server.py"]
+        process.cwd.return_value = "C:\\other-app"
+        with patch("psutil.net_connections", return_value=[listener]), patch("psutil.Process", return_value=process), patch("start_manager.subprocess.run") as taskkill:
+            stopped, message = force_stop_local_capswriter_server()
+        self.assertFalse(stopped)
+        self.assertIn("已拒绝结束", message)
+        taskkill.assert_not_called()
 
 
 class WindowsStartupTests(unittest.TestCase):

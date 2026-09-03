@@ -10,6 +10,7 @@ import os
 import re
 import queue
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -73,6 +74,54 @@ def stop_previous_manager() -> None:
     if pid != os.getpid():
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
         time.sleep(0.5)
+
+
+def stop_managed_process_tree(process: subprocess.Popen, timeout: float = 4) -> None:
+    """结束管理器创建的进程及其后代，兼容 Windows venv 启动的二层 Python。"""
+    if process.poll() is not None:
+        return
+    try:
+        # venv 的 python/pythonw 启动器会再派生真正执行代码的系统 Python。
+        # 只 terminate 启动器会遗留服务端子进程继续占用 6016。
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, check=False)
+        process.wait(timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        if process.poll() is None:
+            process.kill()
+
+
+def local_server_is_available(timeout: float = 0.3) -> bool:
+    """返回本机 6016 端口是否已有可连接的 CapsWriter 服务端。"""
+    try:
+        with socket.create_connection(("127.0.0.1", int(ServerConfig.port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def force_stop_local_capswriter_server() -> tuple[bool, str]:
+    """只在 6016 的监听者明确属于当前源码目录时，强制结束该服务端进程树。"""
+    try:
+        import psutil
+    except ImportError:
+        return False, "缺少进程检查组件，无法安全强制重启服务端"
+    listener = next((item for item in psutil.net_connections(kind="tcp")
+                     if item.status == psutil.CONN_LISTEN and item.laddr.port == int(ServerConfig.port)), None)
+    if listener is None or listener.pid is None:
+        return True, "没有遗留服务端"
+    try:
+        process = psutil.Process(listener.pid)
+        command = " ".join(process.cmdline()).lower()
+        working_dir = Path(process.cwd()).resolve()
+    except (psutil.Error, OSError):
+        return False, "无法确认 6016 监听进程的归属，已拒绝强制结束"
+    if "start_server.py" not in command or working_dir != ROOT_DIR.resolve():
+        return False, f"6016 正由非当前 CapsWriter 服务占用（PID {listener.pid}），已拒绝结束"
+    subprocess.run(["taskkill", "/PID", str(listener.pid), "/T", "/F"], capture_output=True, check=False)
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline and local_server_is_available(timeout=0.1):
+        time.sleep(0.1)
+    return (not local_server_is_available(timeout=0.1), "已强制结束遗留 CapsWriter 服务端")
 
 
 def read_lines(path: Path) -> list[str]:
@@ -1012,6 +1061,13 @@ class CapsWriterManager(tk.Tk):
     def start_engine(self) -> None:
         self._engine_generation += 1
         generation = self._engine_generation
+        if local_server_is_available():
+            # 防御异常退出留下的旧服务端：先复用可连接的本地服务，避免重复抢占 6016。
+            # 端口并非可连接时才会继续创建新服务端，原有端口冲突日志仍可提示外部占用。
+            self._server_process = None
+            self.status.configure(text="检测到已运行的本地识别服务，正在复用…")
+            self._start_client()
+            return
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._server_process = subprocess.Popen([*runtime_command("start_server.py"), "--managed"], cwd=ROOT_DIR, creationflags=flags)
         self.children_processes.append(self._server_process)
@@ -1055,20 +1111,16 @@ class CapsWriterManager(tk.Tk):
     def _stop_client(self) -> None:
         """停止麦克风客户端，不重启管理器或本地识别服务端。"""
         process = self._client_process
-        if process and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        if process:
+            stop_managed_process_tree(process)
         self.children_processes = [child for child in self.children_processes if child is not process]
         self._client_process = None
 
     def _refresh_input_toggle(self) -> None:
         if self.input_enabled:
-            self.input_toggle_button.configure(text="收音中 · 临时关闭", style="InputEnabled.TButton")
+            self.input_toggle_button.configure(text="收音中", style="InputEnabled.TButton")
         else:
-            self.input_toggle_button.configure(text="收音已关 · 重新开启", style="InputPaused.TButton")
+            self.input_toggle_button.configure(text="收音已关", style="InputPaused.TButton")
 
     def toggle_input(self) -> None:
         """临时停/开本机麦克风，避免远程桌面双端重复输入。"""
@@ -1090,17 +1142,20 @@ class CapsWriterManager(tk.Tk):
             self.start_engine()
 
     def restart_engine(self) -> None:
-        self.stop_engine(); self.start_engine()
+        """以完整进程树和端口兜底重启输入引擎，不误杀非当前 CapsWriter 进程。"""
+        self._stop_client()
+        self.stop_engine()
+        stopped, message = force_stop_local_capswriter_server()
+        if not stopped:
+            self.status.configure(text=message)
+            return
+        self.status.configure(text=f"{message}；正在启动干净的本地识别服务…")
+        self.start_engine()
 
     def stop_engine(self) -> None:
         self._engine_generation += 1
         for process in self.children_processes:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=4)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+            stop_managed_process_tree(process)
         self.children_processes.clear()
         self._server_process = None
         self._client_process = None
