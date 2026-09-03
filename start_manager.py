@@ -181,6 +181,7 @@ class CapsWriterManager(tk.Tk):
         self.children_processes: list[subprocess.Popen] = []
         self._server_process: subprocess.Popen | None = None
         self._client_process: subprocess.Popen | None = None
+        self.input_enabled = True
         self._engine_generation = 0
         self._tray_icon = None
         self._tray_commands: queue.Queue[str] = queue.Queue()
@@ -221,6 +222,10 @@ class CapsWriterManager(tk.Tk):
         style.map("TButton", background=[("active", colors["hover"]), ("pressed", "#45454A")])
         style.configure("Accent.TButton", background=colors["blue"], foreground="#FFFFFF", padding=(12, 7))
         style.map("Accent.TButton", background=[("active", colors["blue_hover"]), ("pressed", "#0067AC")])
+        style.configure("InputEnabled.TButton", background="#27805B", foreground="#FFFFFF", padding=(12, 7))
+        style.map("InputEnabled.TButton", background=[("active", "#35966D"), ("pressed", "#1C6042")])
+        style.configure("InputPaused.TButton", background="#B74444", foreground="#FFFFFF", padding=(12, 7))
+        style.map("InputPaused.TButton", background=[("active", "#CC5555"), ("pressed", "#893333")])
         style.configure("TEntry", fieldbackground=colors["surface"], foreground=colors["text"], bordercolor=colors["border"], insertcolor="#FFFFFF", padding=6)
         style.configure("TCombobox", fieldbackground=colors["surface"], background=colors["surface"], foreground=colors["text"], arrowcolor=colors["text"], padding=5)
         style.map("TCombobox", fieldbackground=[("readonly", colors["surface"])], foreground=[("readonly", colors["text"])])
@@ -248,6 +253,9 @@ class CapsWriterManager(tk.Tk):
         ttk.Label(brand, text="CapsWriter", style="Title.TLabel").pack(anchor="w")
         ttk.Label(brand, text="LOCAL INPUT MANAGER", style="Subtitle.TLabel").pack(anchor="w")
         ttk.Button(top, text="重启输入引擎", command=self.restart_engine, style="Accent.TButton").pack(side="right")
+        self.input_toggle_button = ttk.Button(top, command=self.toggle_input, style="InputEnabled.TButton")
+        self.input_toggle_button.pack(side="right", padx=(0, 8))
+        self._refresh_input_toggle()
         self.mic_status = ttk.Label(top, text="麦克风：检测中…", style="MicOnline.TLabel")
         self.mic_status.pack(side="right", padx=(0, 10))
         self.status = ttk.Label(top, text="正在启动…", style="Engine.TLabel")
@@ -841,6 +849,11 @@ class CapsWriterManager(tk.Tk):
 
     def refresh_microphone_status(self) -> None:
         """独立显示默认输入设备；与客户端的 5 秒热插拔恢复相互独立。"""
+        if not self.input_enabled:
+            self.mic_status.configure(text="收音：已临时关闭", style="MicOffline.TLabel")
+            if self.winfo_exists():
+                self.after(2000, self.refresh_microphone_status)
+            return
         try:
             device = preferred_input_device()
             if device is None:
@@ -1025,13 +1038,56 @@ class CapsWriterManager(tk.Tk):
             self._tray_commands.put("engine_timeout")
             return
 
-        if generation != self._engine_generation:
+        if generation != self._engine_generation or not self.input_enabled:
             return
 
+        self._start_client()
+
+    def _start_client(self) -> None:
+        """只启动本机收音客户端；服务端和管理器保持运行。"""
+        if not self.input_enabled or (self._client_process and self._client_process.poll() is None):
+            return
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._client_process = subprocess.Popen([*runtime_command("start_client.py"), "--managed"], cwd=ROOT_DIR, creationflags=flags)
         self.children_processes.append(self._client_process)
         self._tray_commands.put("engine_ready")
+
+    def _stop_client(self) -> None:
+        """停止麦克风客户端，不重启管理器或本地识别服务端。"""
+        process = self._client_process
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        self.children_processes = [child for child in self.children_processes if child is not process]
+        self._client_process = None
+
+    def _refresh_input_toggle(self) -> None:
+        if self.input_enabled:
+            self.input_toggle_button.configure(text="收音中 · 临时关闭", style="InputEnabled.TButton")
+        else:
+            self.input_toggle_button.configure(text="收音已关 · 重新开启", style="InputPaused.TButton")
+
+    def toggle_input(self) -> None:
+        """临时停/开本机麦克风，避免远程桌面双端重复输入。"""
+        self.input_enabled = not self.input_enabled
+        self._refresh_input_toggle()
+        if not self.input_enabled:
+            self._stop_client()
+            self.mic_status.configure(text="收音：已临时关闭", style="MicOffline.TLabel")
+            self.status.configure(text="本机收音已临时关闭；识别服务和管理器仍在运行")
+            return
+        server = self._server_process
+        if server and server.poll() is None:
+            import threading
+            generation = self._engine_generation
+            threading.Thread(target=self._start_client_when_server_ready, args=(generation, server), name="capswriter-input-resume", daemon=True).start()
+            self.status.configure(text="正在重新开启本机收音…")
+        else:
+            self.status.configure(text="识别服务未运行，正在恢复输入引擎…")
+            self.start_engine()
 
     def restart_engine(self) -> None:
         self.stop_engine(); self.start_engine()
@@ -1046,6 +1102,8 @@ class CapsWriterManager(tk.Tk):
                 except subprocess.TimeoutExpired:
                     process.kill()
         self.children_processes.clear()
+        self._server_process = None
+        self._client_process = None
 
     def shutdown(self) -> None:
         if self._log_refresh_after_id is not None:
