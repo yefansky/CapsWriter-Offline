@@ -11,7 +11,8 @@ Claude Code | cloud cold | cloud code
 config_client.py | config_client 点 py | config_client
 config_server.py | config_server 点 py | config_server
 Llama.cpp | 拉马点 CPP
-CUDA | 酷的 | kuda
+SVN
+CUDA | 酷的 | kuda ~~~ 库的
 PyTorch
 TensorRT
 DirectML
